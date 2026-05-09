@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>aTeXi</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">aTeXi</div>
+      <div class="filename" id="filename">—</div>
+      <div class="actions">
+        <select id="templates" aria-label="Load template">
+          <option value="">Templates…</option>
+        </select>
+        <span class="status" id="status" data-state="idle">
+          <span class="dot"></span>
+          <span class="label">idle</span>
+        </span>
+      </div>
+    </header>
+    <main class="split">
+      <section class="pane editor-pane">
+        <div id="editor"></div>
+      </section>
+      <div class="divider" id="divider" aria-hidden="true"></div>
+      <section class="pane preview-pane">
+        <iframe
+          id="preview"
+          title="PDF preview"
+          src="about:blank"
+        ></iframe>
+        <pre class="error" id="error" hidden></pre>
+      </section>
+    </main>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

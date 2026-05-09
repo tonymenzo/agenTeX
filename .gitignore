@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.build/
+.tectonic-cache/
+.claude/state/
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+.DS_Store
