@@ -200,6 +200,52 @@ async def pdf() -> FileResponse:
     return FileResponse(out, media_type="application/pdf")
 
 
+def _resolve_insert_index(content: str, after_line: int | None) -> int:
+    if after_line is None or after_line < 0:
+        return len(content)
+    lines = content.split("\n")
+    if after_line >= len(lines):
+        return len(content)
+    return sum(len(line) + 1 for line in lines[: after_line + 1])
+
+
+@app.post("/api/stream")
+async def stream(payload: dict) -> dict:
+    text = payload.get("text", "")
+    if not isinstance(text, str):
+        raise HTTPException(400, "text must be a string")
+    delay_ms = max(0, int(payload.get("delay_ms", 15)))
+    after_line = payload.get("after_line")
+    if after_line is not None:
+        try:
+            after_line = int(after_line)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "after_line must be an int")
+
+    if not ACTIVE_DOC.exists():
+        raise HTTPException(404, "no active doc")
+    content = ACTIVE_DOC.read_text(encoding="utf-8")
+    insert_index = _resolve_insert_index(content, after_line)
+
+    log.info("stream: %d chars at index %d (delay=%dms)", len(text), insert_index, delay_ms)
+    await state.broadcast({"type": "stream_begin", "from_index": insert_index})
+    delay = delay_ms / 1000.0
+    for ch in text:
+        await state.broadcast({"type": "stream_char", "ch": ch})
+        if delay:
+            await asyncio.sleep(delay)
+
+    new_content = content[:insert_index] + text + content[insert_index:]
+    new_bytes = new_content.encode("utf-8")
+    state.last_hash = sha(new_bytes)
+    ACTIVE_DOC.write_bytes(new_bytes)
+    await state.broadcast(
+        {"type": "stream_end", "content": new_content, "hash": state.last_hash}
+    )
+    schedule_render()
+    return {"ok": True, "chars": len(text), "insert_index": insert_index}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
