@@ -72,6 +72,28 @@ def ensure_server_running(wait_seconds: int = 6) -> dict[str, Any]:
 
 
 @define_tool
+def read_doc() -> dict[str, Any]:
+    """Return the current state of the active aTeXi document.
+
+    Use this to load fresh content when you need to know what's in the doc
+    --- e.g., before constructing a `find` for edit_doc, or after a previous
+    tool response had `user_edited_since=True`. This is the canonical
+    agent-side read; prefer it over the native Read tool on docs/*.tex.
+
+    Reading also resets the `user_edited_since` flag, so the next tool call
+    won't redundantly report the user's earlier edits.
+
+    Returns:
+        {"path": str, "content": str, "hash": str, "user_edited_since": bool}
+        `user_edited_since` is True if the user typed in the browser since
+        your last agent tool call.
+    """
+    r = requests.get(f"{ATEXI_BASE}/api/doc/agent", timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+@define_tool
 def edit_doc(find: str, replace: str, stream: bool = False, delay_ms: int = 15) -> dict[str, Any]:
     """Replace a unique occurrence of `find` with `replace` in the live aTeXi doc.
 
@@ -79,6 +101,12 @@ def edit_doc(find: str, replace: str, stream: bool = False, delay_ms: int = 15) 
     Write tools write to disk but do NOT show up live in the user's browser
     editor; this tool does. The user is watching the browser; silent disk
     writes are wrong.
+
+    The response includes `user_edited_since`: True if the user typed in
+    the browser between your previous agent tool call and this one. When
+    True, your local mental model of the doc is stale --- call read_doc
+    before your next edit. When False, you can keep editing without
+    re-reading.
 
     Args:
         find: Exact text to locate in the document. MUST be unique --- include
@@ -92,7 +120,8 @@ def edit_doc(find: str, replace: str, stream: bool = False, delay_ms: int = 15) 
         delay_ms: Per-character delay when streaming. Ignored when stream=False.
 
     Returns:
-        On success: {"ok": True, "from_index": int, "to_index": int, "chars": int}
+        On success: {"ok": True, "from_index": int, "to_index": int,
+                     "chars": int, "user_edited_since": bool}
         On failure: {"ok": False, "status": int, "error": str}
             status 404 -> `find` not in document
             status 409 -> `find` appears more than once (add more context)
@@ -115,6 +144,11 @@ def stream_edit(text: str, after_line: int = -1, delay_ms: int = 15) -> dict[str
     Prefer this tool over native Edit/Write for any insertion into
     aTeXi/docs/ --- native tools won't show up live for the user.
 
+    The response includes `user_edited_since`: True if the user typed in
+    the browser between your previous agent tool call and this one. When
+    True, your local mental model of the doc is stale --- call read_doc
+    before your next edit.
+
     Args:
         text: Content to insert. Multi-line is fine; newlines stream too.
         after_line: 0-indexed line to insert after. -1 (default) appends at
@@ -124,7 +158,8 @@ def stream_edit(text: str, after_line: int = -1, delay_ms: int = 15) -> dict[str
             (still visible, but no typing animation).
 
     Returns:
-        {"ok": True, "chars": int, "insert_index": int}
+        {"ok": True, "chars": int, "insert_index": int,
+         "user_edited_since": bool}
     """
     payload: dict[str, Any] = {"text": text, "delay_ms": delay_ms}
     if after_line >= 0:

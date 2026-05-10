@@ -12,6 +12,7 @@
   let saveTimer = null;
   let streaming = false;
   let streamPos = 0;
+  let unrendered = false;
 
   function setStatus(state, label) {
     statusEl.dataset.state = state;
@@ -46,6 +47,8 @@
     }
     if (streaming) return;
     scheduleSave();
+    unrendered = true;
+    setStatus("modified", "⌘S to render");
   });
 
   function streamBegin(fromIndex, toIndex) {
@@ -117,6 +120,7 @@
         setStatus("ok", "rendered");
         setError(null);
         previewEl.src = msg.url;
+        unrendered = false;
       } else if (msg.type === "render_failed") {
         setStatus("error", "build error");
         setError(msg.log || "tectonic failed");
@@ -173,6 +177,24 @@
     dragging = false;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
+  });
+
+  function requestRender() {
+    if (!unrendered) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      sendSave();
+    }
+    socket.send(JSON.stringify({ type: "render" }));
+  }
+
+  window.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
+      e.preventDefault();
+      requestRender();
+    }
   });
 
   loadTemplates();
