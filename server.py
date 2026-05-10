@@ -35,9 +35,8 @@ class State:
         self.clients: set[WebSocket] = set()
         self.last_hash: str = ""
         self.last_pdf_hash: str = ""
-        self.debounce_task: asyncio.Task | None = None
-        self.render_lock: asyncio.Lock = asyncio.Lock()
-        self.pending_render: bool = False
+        self.render_trigger: asyncio.Event = asyncio.Event()
+        self.daemon_task: asyncio.Task | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
 
     async def broadcast(self, message: dict) -> None:
@@ -80,24 +79,25 @@ async def handle_disk_change() -> None:
 
 
 def schedule_render() -> None:
-    if state.debounce_task and not state.debounce_task.done():
-        state.debounce_task.cancel()
-    state.debounce_task = asyncio.create_task(render_after_delay())
+    state.render_trigger.set()
 
 
-async def render_after_delay() -> None:
-    try:
-        await asyncio.sleep(RENDER_DEBOUNCE)
-    except asyncio.CancelledError:
-        return
-    if state.render_lock.locked():
-        state.pending_render = True
-        return
-    async with state.render_lock:
-        await run_render()
-        while state.pending_render:
-            state.pending_render = False
+async def render_daemon() -> None:
+    while True:
+        await state.render_trigger.wait()
+        state.render_trigger.clear()
+        try:
+            await asyncio.sleep(RENDER_DEBOUNCE)
+        except asyncio.CancelledError:
+            return
+        # Absorb any triggers that arrived during the debounce window
+        state.render_trigger.clear()
+        try:
             await run_render()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("render daemon: unexpected error")
 
 
 async def run_render() -> None:
@@ -140,10 +140,13 @@ async def lifespan(app: FastAPI):
     observer.schedule(DocWatcher(), str(DOCS), recursive=False)
     observer.start()
     log.info("watching %s (polling)", DOCS)
+    state.daemon_task = asyncio.create_task(render_daemon())
     schedule_render()
     try:
         yield
     finally:
+        if state.daemon_task:
+            state.daemon_task.cancel()
         observer.stop()
         observer.join()
 
