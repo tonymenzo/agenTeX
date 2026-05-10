@@ -42,12 +42,6 @@ class State:
         # agent tool call. Consumed (and reset) by every agent-facing endpoint.
         self.user_edits_pending: bool = False
 
-
-def consume_user_edit_flag() -> bool:
-    flag = state.user_edits_pending
-    state.user_edits_pending = False
-    return flag
-
     async def broadcast(self, message: dict) -> None:
         dead = []
         for ws in self.clients:
@@ -60,6 +54,12 @@ def consume_user_edit_flag() -> bool:
 
 
 state = State()
+
+
+def consume_user_edit_flag() -> bool:
+    flag = state.user_edits_pending
+    state.user_edits_pending = False
+    return flag
 
 
 class DocWatcher(FileSystemEventHandler):

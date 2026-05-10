@@ -5,7 +5,7 @@
   const statusLabel = statusEl.querySelector(".label");
   const previewEl = $("preview");
   const errorEl = $("error");
-  const templatesEl = $("templates");
+  const renderBtn = $("render-btn");
 
   let suppressNextChange = false;
   let socket = null;
@@ -48,7 +48,7 @@
     if (streaming) return;
     scheduleSave();
     unrendered = true;
-    setStatus("modified", "⌘S to render");
+    setStatus("modified", "modified");
   });
 
   function streamBegin(fromIndex, toIndex) {
@@ -134,30 +134,6 @@
     });
   }
 
-  async function loadTemplates() {
-    try {
-      const r = await fetch("/api/templates");
-      const names = await r.json();
-      templatesEl.innerHTML = '<option value="">Templates…</option>';
-      for (const n of names) {
-        const o = document.createElement("option");
-        o.value = n;
-        o.textContent = n;
-        templatesEl.appendChild(o);
-      }
-    } catch (_) {
-      // best-effort
-    }
-  }
-
-  templatesEl.addEventListener("change", async () => {
-    const name = templatesEl.value;
-    if (!name) return;
-    templatesEl.value = "";
-    if (!confirm(`Replace current document with "${name}"?`)) return;
-    await fetch(`/api/load-template/${encodeURIComponent(name)}`, { method: "POST" });
-  });
-
   const divider = $("divider");
   let dragging = false;
   divider.addEventListener("mousedown", () => {
@@ -197,7 +173,11 @@
     }
   });
 
-  loadTemplates();
+  renderBtn.addEventListener("click", () => {
+    requestRender();
+    editor.focus();
+  });
+
   connect();
   window.addEventListener("resize", () => editor.refresh());
 })();
