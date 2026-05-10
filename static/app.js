@@ -7,6 +7,54 @@
   const errorEl = $("error");
   const renderBtn = $("render-btn");
 
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+  }
+  const PDF_SCALE = 1.5;
+  let renderToken = 0;
+
+  async function renderPdf(url) {
+    if (!window.pdfjsLib) {
+      previewEl.textContent = "PDF.js failed to load";
+      return;
+    }
+    const myToken = ++renderToken;
+    const scrollTop = previewEl.scrollTop;
+    let pdf;
+    try {
+      pdf = await window.pdfjsLib.getDocument({ url }).promise;
+    } catch (e) {
+      if (myToken !== renderToken) return;
+      previewEl.textContent = "Failed to load PDF: " + e.message;
+      return;
+    }
+    if (myToken !== renderToken) return;
+    const dpr = window.devicePixelRatio || 1;
+    const scale = PDF_SCALE * dpr;
+    const canvases = new Array(pdf.numPages);
+    await Promise.all(
+      Array.from({ length: pdf.numPages }, (_, i) => (async () => {
+        const page = await pdf.getPage(i + 1);
+        if (myToken !== renderToken) return;
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.className = "pdf-page";
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        canvas.style.width = Math.floor(viewport.width / dpr) + "px";
+        canvas.style.height = Math.floor(viewport.height / dpr) + "px";
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+        if (myToken !== renderToken) return;
+        canvases[i] = canvas;
+      })())
+    );
+    if (myToken !== renderToken) return;
+    previewEl.replaceChildren(...canvases.filter(Boolean));
+    const maxScroll = Math.max(0, previewEl.scrollHeight - previewEl.clientHeight);
+    previewEl.scrollTop = Math.min(scrollTop, maxScroll);
+  }
+
   let suppressNextChange = false;
   let socket = null;
   let saveTimer = null;
@@ -119,7 +167,7 @@
       } else if (msg.type === "rendered") {
         setStatus("ok", "rendered");
         setError(null);
-        previewEl.src = msg.url;
+        renderPdf(msg.url);
         unrendered = false;
       } else if (msg.type === "render_failed") {
         setStatus("error", "build error");

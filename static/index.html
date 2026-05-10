@@ -10,6 +10,7 @@
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/stex/stex.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/matchbrackets.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/selection/active-line.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
   </head>
   <body>
     <header class="topbar">
@@ -31,11 +32,7 @@
       </section>
       <div class="divider" id="divider" aria-hidden="true"></div>
       <section class="pane preview-pane">
-        <iframe
-          id="preview"
-          title="PDF preview"
-          src="about:blank"
-        ></iframe>
+        <div id="preview" class="preview" aria-label="PDF preview"></div>
         <pre class="error" id="error" hidden></pre>
       </section>
     </main>
