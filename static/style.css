@@ -124,31 +124,66 @@ select#templates:hover {
   background: var(--bg);
 }
 
-#editor {
+.editor-pane > textarea {
+  display: none;
+}
+
+.cm-s-atexi.CodeMirror {
   height: 100%;
   width: 100%;
-}
-
-.cm-editor {
-  height: 100%;
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--mono);
   font-size: 13px;
-}
-
-.cm-editor.cm-focused {
-  outline: none;
-}
-
-.cm-scroller {
-  font-family: var(--mono);
   line-height: 1.6;
 }
 
-.cm-gutters {
-  background: var(--bg) !important;
-  border-right: 1px solid var(--border) !important;
-  color: var(--text-dim) !important;
+.cm-s-atexi .CodeMirror-gutters {
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  padding-right: 4px;
 }
+
+.cm-s-atexi .CodeMirror-linenumber {
+  color: var(--text-dim);
+  opacity: 0.55;
+}
+
+.cm-s-atexi .CodeMirror-activeline-background {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.cm-s-atexi .CodeMirror-activeline-gutter .CodeMirror-linenumber {
+  opacity: 1;
+  color: var(--text);
+}
+
+.cm-s-atexi .CodeMirror-cursor {
+  border-left: 1.5px solid var(--accent);
+}
+
+.cm-s-atexi .CodeMirror-selected,
+.cm-s-atexi .CodeMirror-line::selection,
+.cm-s-atexi .CodeMirror-line > span::selection,
+.cm-s-atexi .CodeMirror-line > span > span::selection {
+  background: rgba(139, 158, 255, 0.22);
+}
+
+.cm-s-atexi .CodeMirror-matchingbracket {
+  color: var(--accent) !important;
+  text-decoration: none;
+  background: rgba(139, 158, 255, 0.12);
+}
+
+.cm-s-atexi .cm-tag      { color: #c8a2ff; }
+.cm-s-atexi .cm-bracket  { color: var(--text-dim); }
+.cm-s-atexi .cm-builtin  { color: #8b9eff; }
+.cm-s-atexi .cm-keyword  { color: #c8a2ff; }
+.cm-s-atexi .cm-string   { color: #98c379; }
+.cm-s-atexi .cm-number   { color: #d19a66; }
+.cm-s-atexi .cm-comment  { color: #6b7280; font-style: italic; }
+.cm-s-atexi .cm-variable { color: var(--text); }
+.cm-s-atexi .cm-atom     { color: #69c293; }
 
 .divider {
   background: var(--border);

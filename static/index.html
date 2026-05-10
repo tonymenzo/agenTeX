@@ -4,7 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>aTeXi</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.css" />
     <link rel="stylesheet" href="/static/style.css" />
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/stex/stex.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/matchbrackets.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/selection/active-line.js"></script>
   </head>
   <body>
     <header class="topbar">
@@ -22,7 +27,7 @@
     </header>
     <main class="split">
       <section class="pane editor-pane">
-        <div id="editor"></div>
+        <textarea id="editor"></textarea>
       </section>
       <div class="divider" id="divider" aria-hidden="true"></div>
       <section class="pane preview-pane">
@@ -34,6 +39,6 @@
         <pre class="error" id="error" hidden></pre>
       </section>
     </main>
-    <script type="module" src="/static/app.js"></script>
+    <script src="/static/app.js"></script>
   </body>
 </html>
