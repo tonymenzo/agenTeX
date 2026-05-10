@@ -35,7 +35,9 @@ class State:
         self.clients: set[WebSocket] = set()
         self.last_hash: str = ""
         self.last_pdf_hash: str = ""
-        self.render_task: asyncio.Task | None = None
+        self.debounce_task: asyncio.Task | None = None
+        self.render_lock: asyncio.Lock = asyncio.Lock()
+        self.pending_render: bool = False
         self.loop: asyncio.AbstractEventLoop | None = None
 
     async def broadcast(self, message: dict) -> None:
@@ -78,9 +80,9 @@ async def handle_disk_change() -> None:
 
 
 def schedule_render() -> None:
-    if state.render_task and not state.render_task.done():
-        state.render_task.cancel()
-    state.render_task = asyncio.create_task(render_after_delay())
+    if state.debounce_task and not state.debounce_task.done():
+        state.debounce_task.cancel()
+    state.debounce_task = asyncio.create_task(render_after_delay())
 
 
 async def render_after_delay() -> None:
@@ -88,7 +90,14 @@ async def render_after_delay() -> None:
         await asyncio.sleep(RENDER_DEBOUNCE)
     except asyncio.CancelledError:
         return
-    await run_render()
+    if state.render_lock.locked():
+        state.pending_render = True
+        return
+    async with state.render_lock:
+        await run_render()
+        while state.pending_render:
+            state.pending_render = False
+            await run_render()
 
 
 async def run_render() -> None:
@@ -108,8 +117,9 @@ async def run_render() -> None:
     )
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
-        log = (stderr or stdout).decode("utf-8", errors="replace")
-        await state.broadcast({"type": "render_failed", "log": log})
+        err = (stderr or stdout).decode("utf-8", errors="replace")
+        log.warning("render failed (rc=%d)", proc.returncode)
+        await state.broadcast({"type": "render_failed", "log": err})
         return
     out = BUILD / (ACTIVE_DOC.stem + ".pdf")
     if not out.exists():
