@@ -64,20 +64,27 @@ body {
   justify-content: flex-end;
 }
 
-select#templates {
+.render-btn {
   background: var(--bg-elev);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 4px 8px;
+  padding: 4px 10px;
   font-family: var(--sans);
   font-size: 12px;
+  letter-spacing: 0.01em;
   outline: none;
   cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
 }
 
-select#templates:hover {
+.render-btn:hover {
   border-color: #2a2e36;
+  color: var(--accent);
+}
+
+.render-btn:active {
+  transform: translateY(0.5px);
 }
 
 .status {
