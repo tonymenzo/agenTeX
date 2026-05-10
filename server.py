@@ -242,6 +242,16 @@ async def stream(payload: dict) -> dict:
     await state.broadcast(
         {"type": "stream_end", "content": new_content, "hash": state.last_hash}
     )
+    # Also send a canonical doc message so any client that missed chars
+    # (or doesn't speak the stream_* protocol) lands on the right content.
+    await state.broadcast(
+        {
+            "type": "doc",
+            "content": new_content,
+            "path": ACTIVE_DOC.name,
+            "hash": state.last_hash,
+        }
+    )
     schedule_render()
     return {"ok": True, "chars": len(text), "insert_index": insert_index}
 

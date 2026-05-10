@@ -4,19 +4,61 @@
 \usepackage{microtype}
 \usepackage{hyperref}
 
-\title{Title}
-\author{Author}
+\title{aTeXi \\ \large a live LaTeX surface}
+\author{Tony Menzo}
 \date{\today}
 
 \begin{document}
 \maketitle
 
-\section{Introduction}
+\noindent
+This page is being rendered live by tectonic. Edits on either side --
+yours in the browser, mine through the file system -- propagate in both
+directions through a small WebSocket on top of FastAPI.
 
-\section{Methods}
+\section*{A few smoke tests}
 
-\section{Results}
+What's up dog how it this going on
 
-\section{Discussion}
+Inline math should typeset cleanly, e.g.\ the QED Lagrangian
+$\mathcal{L} = -\tfrac{1}{4} F_{\mu\nu} F^{\mu\nu} + i\bar\psi\gamma^\mu D_\mu \psi - m\bar\psi\psi$.
+
+Display math:
+\[
+  \int_{-\infty}^{\infty} e^{-x^2}\, dx = \sqrt{\pi}.
+\]
+
+An aligned derivation:
+\begin{align*}
+  \nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0}, &
+  \nabla \times \mathbf{E} &= -\frac{\partial \mathbf{B}}{\partial t}, \\
+  \nabla \cdot \mathbf{B} &= 0, &
+  \nabla \times \mathbf{B} &= \mu_0 \mathbf{J} + \mu_0 \varepsilon_0 \frac{\partial \mathbf{E}}{\partial t}.
+\end{align*}
+
+\section*{What works}
+
+\begin{itemize}
+  \item Tectonic builds on file change, debounced 400\,ms server-side.
+  \item The browser editor uses CodeMirror with a stex syntax mode.
+  \item A \texttt{PreToolUse} hook prevents the agent from clobbering
+        edits made since its last read.
+  \item Edits from either side propagate through a polling file watcher
+        and a serialized render queue, so concurrent typing and agent
+        writes don't orphan a tectonic run.
+\end{itemize}
+
+
+\section*{Streaming}
+
+This paragraph is being inserted character by character through a small
+\texttt{POST /api/stream} endpoint that broadcasts each character over
+the same WebSocket the editor uses for live sync. The file on disk is
+written once at the end, so tectonic renders a single time.
+
+\[
+  T(n) = n \cdot \Delta t_{\text{char}} + T_{\text{tectonic}}.
+\]
+
 
 \end{document}
