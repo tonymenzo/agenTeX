@@ -9,6 +9,8 @@ PDF on the right. Edits flow over a WebSocket; the user is *watching*.
 **Files under `docs/`** are managed by the live-preview pipeline. Always edit
 them through the MCP tools, never with native Edit/Write:
 
+- `mcp__atexi__read_doc` — fetch current content. Use this instead of the
+  native Read tool on `docs/*.tex`.
 - `mcp__atexi__edit_doc` — find/replace. Default for surgical changes. Set
   `stream=true` if you want the typing animation.
 - `mcp__atexi__stream_edit` — append or insert at a line. Default tool for
@@ -21,6 +23,28 @@ blocks native Edit/Write on `docs/*.tex` to enforce this.
 
 **Files outside `docs/`** (`server.py`, `static/`, `tools/`, `.claude/`,
 `README.md`, etc.) are normal — use Edit/Write as you would anywhere.
+
+## Re-reading protocol
+
+Every agent tool call returns a `user_edited_since` flag. It's True when the
+user has typed in the browser between your previous tool call and this one.
+
+- `user_edited_since=False`: your mental model of the doc is current. Keep
+  editing without re-reading.
+- `user_edited_since=True`: the user has changed the doc. Call `read_doc`
+  before your next edit so your `find` arguments still match.
+
+You don't need to re-read between every edit by default; only when the flag
+says so. On your first call in a session, the flag is meaningless --- start
+with a `read_doc` if you need content.
+
+## Render on Cmd+S, not on every keystroke
+
+The user typing in the browser writes to disk but does NOT trigger a
+tectonic render. The status bar flips to a yellow "⌘S to render" dot, and
+the user presses Cmd/Ctrl-S to compile when they're ready. Agent edits via
+`edit_doc` / `stream_edit` always render automatically --- the user only
+opts in for their own typing.
 
 ## Session start
 

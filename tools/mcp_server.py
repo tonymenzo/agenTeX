@@ -7,12 +7,12 @@ from __future__ import annotations
 
 from orchestral.mcp import MCPServer
 
-from tools.atexi import edit_doc, ensure_server_running, stream_edit
+from tools.atexi import edit_doc, ensure_server_running, read_doc, stream_edit
 
 
 def main() -> None:
     MCPServer(
-        tools=[ensure_server_running, edit_doc, stream_edit],
+        tools=[ensure_server_running, read_doc, edit_doc, stream_edit],
         name="atexi",
         version="0.1.0",
         use_display_names=False,

@@ -38,6 +38,15 @@ class State:
         self.render_trigger: asyncio.Event = asyncio.Event()
         self.daemon_task: asyncio.Task | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        # True when the user has typed/saved in the browser since the last
+        # agent tool call. Consumed (and reset) by every agent-facing endpoint.
+        self.user_edits_pending: bool = False
+
+
+def consume_user_edit_flag() -> bool:
+    flag = state.user_edits_pending
+    state.user_edits_pending = False
+    return flag
 
     async def broadcast(self, message: dict) -> None:
         dead = []
@@ -161,6 +170,8 @@ async def index() -> FileResponse:
 
 @app.get("/api/doc")
 async def get_doc() -> dict:
+    """Read-only doc fetch (used by the browser). Does not consume the user
+    edit flag --- agents should use /api/doc/agent instead."""
     if not ACTIVE_DOC.exists():
         return {"path": ACTIVE_DOC.name, "content": "", "hash": ""}
     data = ACTIVE_DOC.read_bytes()
@@ -168,6 +179,27 @@ async def get_doc() -> dict:
         "path": ACTIVE_DOC.name,
         "content": data.decode("utf-8", errors="replace"),
         "hash": sha(data),
+    }
+
+
+@app.get("/api/doc/agent")
+async def get_doc_agent() -> dict:
+    """Agent-side doc fetch. Returns content, hash, and user_edited_since
+    flag, then resets the flag (the agent has now seen the user's edits)."""
+    flag = consume_user_edit_flag()
+    if not ACTIVE_DOC.exists():
+        return {
+            "path": ACTIVE_DOC.name,
+            "content": "",
+            "hash": "",
+            "user_edited_since": flag,
+        }
+    data = ACTIVE_DOC.read_bytes()
+    return {
+        "path": ACTIVE_DOC.name,
+        "content": data.decode("utf-8", errors="replace"),
+        "hash": sha(data),
+        "user_edited_since": flag,
     }
 
 
@@ -253,7 +285,12 @@ async def stream(payload: dict) -> dict:
         }
     )
     schedule_render()
-    return {"ok": True, "chars": len(text), "insert_index": insert_index}
+    return {
+        "ok": True,
+        "chars": len(text),
+        "insert_index": insert_index,
+        "user_edited_since": consume_user_edit_flag(),
+    }
 
 
 async def _commit_and_broadcast(new_content: str) -> str:
@@ -323,7 +360,13 @@ async def edit_doc(payload: dict) -> dict:
         )
         await _commit_and_broadcast(new_content)
 
-    return {"ok": True, "from_index": idx, "to_index": end_idx, "chars": len(replace_text)}
+    return {
+        "ok": True,
+        "from_index": idx,
+        "to_index": end_idx,
+        "chars": len(replace_text),
+        "user_edited_since": consume_user_edit_flag(),
+    }
 
 
 @app.websocket("/ws")
@@ -356,7 +399,10 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     continue
                 ACTIVE_DOC.write_bytes(data)
                 state.last_hash = sha(data)
-                schedule_render()
+                state.user_edits_pending = True
+                # Deliberately NOT scheduling a render here. The user must
+                # press Cmd/Ctrl-S in the browser to trigger one (we get a
+                # 'render' message), so typing doesn't thrash tectonic.
             elif kind == "render":
                 schedule_render()
             elif kind == "ping":

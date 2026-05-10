@@ -98,6 +98,7 @@ select#templates:hover {
 }
 
 .status[data-state="building"] .dot { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+.status[data-state="modified"] .dot { background: var(--warn); }
 .status[data-state="ok"] .dot { background: var(--ok); }
 .status[data-state="error"] .dot { background: var(--err); }
 
