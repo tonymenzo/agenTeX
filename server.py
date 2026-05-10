@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,7 +10,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
+
+log = logging.getLogger("atexi")
 
 ROOT = Path(__file__).parent
 DOCS = ROOT / "docs"
@@ -31,6 +34,7 @@ class State:
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
         self.last_hash: str = ""
+        self.last_pdf_hash: str = ""
         self.render_task: asyncio.Task | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
 
@@ -66,6 +70,7 @@ async def handle_disk_change() -> None:
     h = sha(data)
     if h == state.last_hash:
         return
+    log.info("disk change: %s -> %s", state.last_hash[:8] or "(empty)", h[:8])
     state.last_hash = h
     content = data.decode("utf-8", errors="replace")
     await state.broadcast({"type": "doc", "content": content, "path": ACTIVE_DOC.name, "hash": h})
@@ -111,6 +116,8 @@ async def run_render() -> None:
         await state.broadcast({"type": "render_failed", "log": "tectonic produced no output"})
         return
     h = sha(out.read_bytes())
+    state.last_pdf_hash = h
+    log.info("rendered: %s", h[:8])
     await state.broadcast({"type": "rendered", "url": f"/api/pdf?h={h}"})
 
 
@@ -119,9 +126,10 @@ async def lifespan(app: FastAPI):
     state.loop = asyncio.get_running_loop()
     if ACTIVE_DOC.exists():
         state.last_hash = sha(ACTIVE_DOC.read_bytes())
-    observer = Observer()
+    observer = PollingObserver(timeout=0.3)
     observer.schedule(DocWatcher(), str(DOCS), recursive=False)
     observer.start()
+    log.info("watching %s (polling)", DOCS)
     schedule_render()
     try:
         yield
@@ -194,6 +202,11 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     "hash": sha(data),
                 }
             )
+        out = BUILD / (ACTIVE_DOC.stem + ".pdf")
+        if out.exists():
+            pdf_hash = state.last_pdf_hash or sha(out.read_bytes())
+            state.last_pdf_hash = pdf_hash
+            await ws.send_json({"type": "rendered", "url": f"/api/pdf?h={pdf_hash}"})
         while True:
             msg = await ws.receive_json()
             kind = msg.get("type")
