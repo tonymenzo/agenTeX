@@ -35,10 +35,11 @@ body {
 
 .topbar {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto auto 1fr auto;
   align-items: center;
+  gap: 12px;
   height: 40px;
-  padding: 0 14px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   user-select: none;
@@ -50,12 +51,74 @@ body {
   color: var(--text);
 }
 
-.filename {
+.icon-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--text-dim);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.icon-btn:hover { color: var(--text); background: var(--bg-elev); border-color: var(--border); }
+
+.hamburger {
+  display: block;
+  width: 14px;
+  height: 10px;
+  background-image:
+    linear-gradient(currentColor, currentColor),
+    linear-gradient(currentColor, currentColor),
+    linear-gradient(currentColor, currentColor);
+  background-size: 100% 2px;
+  background-repeat: no-repeat;
+  background-position: 0 0, 0 4px, 0 8px;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  min-width: 0;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text-dim);
-  text-align: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  background: transparent;
+  transition: color 0.1s ease, background 0.1s ease, border-color 0.1s ease;
 }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); background: var(--bg-elev); border-color: var(--border); }
+.tab .close {
+  width: 14px; height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-dim);
+  opacity: 0;
+  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+}
+.tab:hover .close, .tab.active .close { opacity: 0.7; }
+.tab .close:hover { background: rgba(255,255,255,0.08); opacity: 1; color: var(--text); }
 
 .actions {
   display: flex;
@@ -114,10 +177,84 @@ body {
   50% { opacity: 0.35; }
 }
 
-.split {
+.layout {
   flex: 1;
   display: grid;
+  grid-template-columns: auto 1fr;
+  min-height: 0;
+}
+
+.sidebar {
+  width: 220px;
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.sidebar.collapsed { display: none; }
+
+.sidebar-header {
+  padding: 10px 14px 6px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.file-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 6px;
+  flex: 1;
+  overflow-y: auto;
+}
+.file-list li {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: color 0.1s ease, background 0.1s ease;
+}
+.file-list li:hover { color: var(--text); background: var(--bg-elev); }
+.file-list li.active { color: var(--text); background: var(--bg-elev); }
+.file-list li .target-mark {
+  width: 6px;
+  text-align: center;
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 0;
+  visibility: hidden;
+}
+.file-list li.target .target-mark { visibility: visible; }
+
+.new-doc-btn {
+  margin: 6px 8px 10px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.new-doc-btn:hover { color: var(--text); border-color: #2a2e36; }
+
+.split {
+  display: grid;
   grid-template-columns: 1fr 1px 1fr;
+  min-width: 0;
   min-height: 0;
 }
 

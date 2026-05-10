@@ -14,8 +14,11 @@
   </head>
   <body>
     <header class="topbar">
+      <button id="sidebar-toggle" class="icon-btn" type="button" aria-label="Toggle file list" title="Toggle file list">
+        <span class="hamburger" aria-hidden="true"></span>
+      </button>
       <div class="brand">aTeXi</div>
-      <div class="filename" id="filename">—</div>
+      <div class="tabs" id="tabs" role="tablist"></div>
       <div class="actions">
         <button id="render-btn" class="render-btn" type="button" title="Save and render (⌘S)">
           Render
@@ -26,15 +29,22 @@
         </span>
       </div>
     </header>
-    <main class="split">
-      <section class="pane editor-pane">
-        <textarea id="editor"></textarea>
-      </section>
-      <div class="divider" id="divider" aria-hidden="true"></div>
-      <section class="pane preview-pane">
-        <div id="preview" class="preview" aria-label="PDF preview"></div>
-        <pre class="error" id="error" hidden></pre>
-      </section>
+    <main class="layout">
+      <aside id="sidebar" class="sidebar collapsed" aria-label="Files">
+        <div class="sidebar-header">Files</div>
+        <ul id="file-list" class="file-list"></ul>
+        <button id="new-doc" class="new-doc-btn" type="button">+ New document</button>
+      </aside>
+      <div class="split">
+        <section class="pane editor-pane">
+          <textarea id="editor"></textarea>
+        </section>
+        <div class="divider" id="divider" aria-hidden="true"></div>
+        <section class="pane preview-pane">
+          <div id="preview" class="preview" aria-label="PDF preview"></div>
+          <pre class="error" id="error" hidden></pre>
+        </section>
+      </div>
     </main>
     <script src="/static/app.js"></script>
   </body>

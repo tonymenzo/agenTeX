@@ -1,11 +1,31 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const filenameEl = $("filename");
   const statusEl = $("status");
   const statusLabel = statusEl.querySelector(".label");
   const previewEl = $("preview");
   const errorEl = $("error");
   const renderBtn = $("render-btn");
+  const tabsEl = $("tabs");
+  const sidebarEl = $("sidebar");
+  const sidebarToggle = $("sidebar-toggle");
+  const fileListEl = $("file-list");
+  const newDocBtn = $("new-doc");
+
+  const STORAGE_PREFIX = "atexi:";
+  const lsGet = (k, fallback) => {
+    try { const v = localStorage.getItem(STORAGE_PREFIX + k); return v == null ? fallback : JSON.parse(v); }
+    catch { return fallback; }
+  };
+  const lsSet = (k, v) => {
+    try { localStorage.setItem(STORAGE_PREFIX + k, JSON.stringify(v)); } catch {}
+  };
+
+  let openTabs = lsGet("openTabs", []);
+  let activeName = "";
+  let renderTargetName = "";
+  let allDocs = [];
+
+  if (lsGet("sidebarExpanded", false)) sidebarEl.classList.remove("collapsed");
 
   if (window.pdfjsLib) {
     window.pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -130,7 +150,18 @@
   }
 
   function applyDoc({ content, path }) {
-    if (path) filenameEl.textContent = path;
+    if (path && path !== activeName) {
+      activeName = path;
+      ensureTab(path);
+      renderTabs();
+      renderFileList();
+      // Switch editor mode based on extension
+      if (path.endsWith(".bib")) {
+        editor.setOption("mode", "text/plain");
+      } else {
+        editor.setOption("mode", "stex");
+      }
+    }
     if (editor.getValue() === content) return;
     suppressNextChange = true;
     const cursor = editor.getCursor();
@@ -138,6 +169,101 @@
     editor.setValue(content);
     editor.setCursor(cursor);
     editor.scrollTo(scroll.left, scroll.top);
+  }
+
+  function ensureTab(name) {
+    if (!openTabs.includes(name)) {
+      openTabs = [...openTabs, name];
+      lsSet("openTabs", openTabs);
+    }
+  }
+
+  function closeTab(name) {
+    const idx = openTabs.indexOf(name);
+    if (idx < 0) return;
+    openTabs = openTabs.filter((n) => n !== name);
+    lsSet("openTabs", openTabs);
+    if (name === activeName) {
+      const fallback = openTabs[idx] || openTabs[idx - 1] || allDocs[0];
+      if (fallback) switchActive(fallback);
+    } else {
+      renderTabs();
+    }
+  }
+
+  async function switchActive(name) {
+    try {
+      await fetch("/api/docs/active", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+    } catch (e) {
+      console.error("switchActive failed", e);
+    }
+  }
+
+  function renderTabs() {
+    const visible = openTabs.filter((n) => allDocs.includes(n));
+    tabsEl.replaceChildren(
+      ...visible.map((name) => {
+        const el = document.createElement("button");
+        el.className = "tab" + (name === activeName ? " active" : "");
+        el.type = "button";
+        el.role = "tab";
+        const label = document.createElement("span");
+        label.textContent = name;
+        el.appendChild(label);
+        const close = document.createElement("span");
+        close.className = "close";
+        close.textContent = "×";
+        close.addEventListener("click", (e) => {
+          e.stopPropagation();
+          closeTab(name);
+        });
+        el.appendChild(close);
+        el.addEventListener("click", () => {
+          if (name !== activeName) switchActive(name);
+        });
+        return el;
+      })
+    );
+  }
+
+  function renderFileList() {
+    fileListEl.replaceChildren(
+      ...allDocs.map((name) => {
+        const li = document.createElement("li");
+        if (name === activeName) li.classList.add("active");
+        if (name === renderTargetName) li.classList.add("target");
+        const mark = document.createElement("span");
+        mark.className = "target-mark";
+        mark.textContent = "•";
+        mark.title = "render target";
+        const label = document.createElement("span");
+        label.textContent = name;
+        li.appendChild(mark);
+        li.appendChild(label);
+        li.addEventListener("click", () => {
+          ensureTab(name);
+          if (name !== activeName) switchActive(name);
+          else renderTabs();
+        });
+        return li;
+      })
+    );
+  }
+
+  function applyDocList(msg) {
+    allDocs = msg.names || [];
+    activeName = msg.active || activeName;
+    renderTargetName = msg.render_target || renderTargetName;
+    // Drop tabs whose files no longer exist
+    openTabs = openTabs.filter((n) => allDocs.includes(n));
+    if (activeName) ensureTab(activeName);
+    lsSet("openTabs", openTabs);
+    renderTabs();
+    renderFileList();
   }
 
   function scheduleSave() {
@@ -160,7 +286,9 @@
     });
     socket.addEventListener("message", (e) => {
       const msg = JSON.parse(e.data);
-      if (msg.type === "doc") {
+      if (msg.type === "doc_list") {
+        applyDocList(msg);
+      } else if (msg.type === "doc") {
         applyDoc(msg);
       } else if (msg.type === "render_started") {
         setStatus("building", "rendering…");
@@ -224,6 +352,33 @@
   renderBtn.addEventListener("click", () => {
     requestRender();
     editor.focus();
+  });
+
+  sidebarToggle.addEventListener("click", () => {
+    sidebarEl.classList.toggle("collapsed");
+    lsSet("sidebarExpanded", !sidebarEl.classList.contains("collapsed"));
+    setTimeout(() => editor.refresh(), 0);
+  });
+
+  newDocBtn.addEventListener("click", async () => {
+    const name = prompt(
+      "New document name (e.g. notes.tex or refs.bib):",
+      "untitled.tex"
+    );
+    if (!name) return;
+    try {
+      const r = await fetch("/api/docs/new", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, activate: true }),
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        alert("Could not create: " + err);
+      }
+    } catch (e) {
+      alert("Could not create: " + e.message);
+    }
   });
 
   connect();
