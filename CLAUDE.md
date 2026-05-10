@@ -9,12 +9,24 @@ PDF on the right. Edits flow over a WebSocket; the user is *watching*.
 **Files under `docs/`** are managed by the live-preview pipeline. Always edit
 them through the MCP tools, never with native Edit/Write:
 
-- `mcp__atexi__read_doc` — fetch current content. Use this instead of the
-  native Read tool on `docs/*.tex`.
+- `mcp__atexi__list_docs` — list all `.tex` / `.bib` files in `docs/`.
+  Returns `active` (what's in the editor) and `render_target` (what
+  Render compiles).
+- `mcp__atexi__read_doc` — fetch current content of the active doc. Use
+  this instead of the native Read tool on `docs/*.tex` and `docs/*.bib`.
+- `mcp__atexi__set_active_doc` — switch which doc is active. Switching to
+  a `.tex` also makes it the render target; switching to a `.bib` keeps
+  the previous `.tex` as the render target so the main draft still
+  compiles.
+- `mcp__atexi__new_doc` — create a new `.tex` or `.bib` in `docs/`,
+  optionally seeded from a template in `templates/`.
 - `mcp__atexi__edit_doc` — find/replace. Default for surgical changes. Set
   `stream=true` if you want the typing animation.
 - `mcp__atexi__stream_edit` — append or insert at a line. Default tool for
   new sections, paragraphs, equations.
+
+`edit_doc`, `stream_edit`, and `read_doc` always operate on the **active**
+doc. If you need to edit a different doc, call `set_active_doc` first.
 
 The native `Edit`/`Write` tools write to disk but **don't show up live** in
 the browser editor. The user only sees them after a hard refresh, which

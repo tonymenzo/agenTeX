@@ -72,6 +72,76 @@ def ensure_server_running(wait_seconds: int = 6) -> dict[str, Any]:
 
 
 @define_tool
+def list_docs() -> dict[str, Any]:
+    """List all documents in the aTeXi docs/ folder.
+
+    Returns the names of every .tex and .bib file, plus which one is
+    currently active (visible in the editor) and which is the render
+    target (compiled when the user clicks Render). Use this to discover
+    what's available before switching.
+
+    Returns:
+        {"names": [str], "active": str, "render_target": str}
+    """
+    r = requests.get(f"{ATEXI_BASE}/api/docs", timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+@define_tool
+def set_active_doc(name: str) -> dict[str, Any]:
+    """Switch the active aTeXi document to `name`.
+
+    The active doc is what the editor displays and what edit_doc /
+    stream_edit operate on. If `name` is a .tex file, it also becomes
+    the render target. Switching to a .bib leaves the render target on
+    the previous .tex (so editing references still recompiles the
+    main draft when the user hits Render).
+
+    Args:
+        name: filename in docs/ (e.g. "notes.tex" or "refs.bib").
+            Must already exist.
+
+    Returns:
+        {"ok": True, "active": str, "render_target": str}
+    """
+    r = requests.post(
+        f"{ATEXI_BASE}/api/docs/active",
+        json={"name": name},
+        timeout=10,
+    )
+    if not r.ok:
+        return {"ok": False, "status": r.status_code, "error": r.text[:500]}
+    return r.json()
+
+
+@define_tool
+def new_doc(name: str, template: str = "", activate: bool = True) -> dict[str, Any]:
+    """Create a new document in aTeXi/docs/.
+
+    Args:
+        name: filename including extension. Must end in .tex or .bib and
+            contain only [A-Za-z0-9._-] characters.
+        template: optional template filename from aTeXi/templates/. If
+            empty, a minimal scaffold is used (\\documentclass...\\end{document}
+            for .tex, a comment header for .bib).
+        activate: when True (default) the new file becomes the active
+            doc immediately.
+
+    Returns:
+        {"ok": True, "active": str, "render_target": str} when activate=True,
+        else {"ok": True, "name": str}.
+    """
+    payload: dict[str, Any] = {"name": name, "activate": activate}
+    if template:
+        payload["template"] = template
+    r = requests.post(f"{ATEXI_BASE}/api/docs/new", json=payload, timeout=15)
+    if not r.ok:
+        return {"ok": False, "status": r.status_code, "error": r.text[:500]}
+    return r.json()
+
+
+@define_tool
 def read_doc() -> dict[str, Any]:
     """Return the current state of the active aTeXi document.
 
