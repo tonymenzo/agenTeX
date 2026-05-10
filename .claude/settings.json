@@ -6,6 +6,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3 .claude/hooks/atexi_steer.py"
+          },
+          {
+            "type": "command",
             "command": "python3 .claude/hooks/mtime_guard.py"
           }
         ]
