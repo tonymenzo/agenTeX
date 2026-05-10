@@ -256,6 +256,76 @@ async def stream(payload: dict) -> dict:
     return {"ok": True, "chars": len(text), "insert_index": insert_index}
 
 
+async def _commit_and_broadcast(new_content: str) -> str:
+    new_bytes = new_content.encode("utf-8")
+    h = sha(new_bytes)
+    state.last_hash = h
+    ACTIVE_DOC.write_bytes(new_bytes)
+    await state.broadcast(
+        {"type": "doc", "content": new_content, "path": ACTIVE_DOC.name, "hash": h}
+    )
+    schedule_render()
+    return h
+
+
+@app.post("/api/edit")
+async def edit_doc(payload: dict) -> dict:
+    """Replace a unique occurrence of `find` with `replace` in the active doc.
+
+    Broadcasts the change directly over the WebSocket -- never relies on the
+    file watcher to detect agent edits. If `stream` is true, the replacement
+    is animated character-by-character.
+    """
+    find_text = payload.get("find")
+    replace_text = payload.get("replace", "")
+    if not isinstance(find_text, str) or not find_text:
+        raise HTTPException(400, "find required")
+    if not isinstance(replace_text, str):
+        raise HTTPException(400, "replace must be a string")
+    stream_mode = bool(payload.get("stream", False))
+    delay_ms = max(0, int(payload.get("delay_ms", 15)))
+
+    if not ACTIVE_DOC.exists():
+        raise HTTPException(404, "no active doc")
+    content = ACTIVE_DOC.read_text(encoding="utf-8")
+    idx = content.find(find_text)
+    if idx < 0:
+        raise HTTPException(404, "find not found in document")
+    if content.find(find_text, idx + 1) >= 0:
+        raise HTTPException(409, "find is not unique; provide more context")
+    end_idx = idx + len(find_text)
+    new_content = content[:idx] + replace_text + content[end_idx:]
+
+    if stream_mode:
+        log.info(
+            "edit (stream): replace %d chars at %d with %d (delay=%dms)",
+            len(find_text),
+            idx,
+            len(replace_text),
+            delay_ms,
+        )
+        await state.broadcast(
+            {"type": "stream_begin", "from_index": idx, "to_index": end_idx}
+        )
+        delay = delay_ms / 1000.0
+        for ch in replace_text:
+            await state.broadcast({"type": "stream_char", "ch": ch})
+            if delay:
+                await asyncio.sleep(delay)
+        h = await _commit_and_broadcast(new_content)
+        await state.broadcast({"type": "stream_end", "content": new_content, "hash": h})
+    else:
+        log.info(
+            "edit: replace %d chars at %d with %d",
+            len(find_text),
+            idx,
+            len(replace_text),
+        )
+        await _commit_and_broadcast(new_content)
+
+    return {"ok": True, "from_index": idx, "to_index": end_idx, "chars": len(replace_text)}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()

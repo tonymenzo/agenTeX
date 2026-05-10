@@ -48,11 +48,16 @@
     scheduleSave();
   });
 
-  function streamBegin(fromIndex) {
+  function streamBegin(fromIndex, toIndex) {
     streaming = true;
     streamPos = fromIndex;
     setStatus("building", "streaming…");
     setError(null);
+    if (toIndex != null && toIndex > fromIndex) {
+      const a = editor.posFromIndex(fromIndex);
+      const b = editor.posFromIndex(toIndex);
+      editor.replaceRange("", a, b);
+    }
     const pos = editor.posFromIndex(streamPos);
     editor.setCursor(pos);
     editor.scrollIntoView(pos, 80);
@@ -116,7 +121,7 @@
         setStatus("error", "build error");
         setError(msg.log || "tectonic failed");
       } else if (msg.type === "stream_begin") {
-        streamBegin(msg.from_index);
+        streamBegin(msg.from_index, msg.to_index);
       } else if (msg.type === "stream_char") {
         streamChar(msg.ch);
       } else if (msg.type === "stream_end") {
