@@ -3,7 +3,10 @@
     "atexi": {
       "command": "/Users/ynot/code/software/miniconda3/envs/atexi/bin/python",
       "args": ["-m", "tools.mcp_server"],
-      "cwd": "/Users/ynot/code/research/aTeXi"
+      "cwd": "/Users/ynot/code/research/aTeXi",
+      "env": {
+        "PYTHONPATH": "/Users/ynot/code/research/aTeXi"
+      }
     }
   }
 }
