@@ -10,6 +10,8 @@
   let suppressNextChange = false;
   let socket = null;
   let saveTimer = null;
+  let streaming = false;
+  let streamPos = 0;
 
   function setStatus(state, label) {
     statusEl.dataset.state = state;
@@ -42,8 +44,34 @@
       suppressNextChange = false;
       return;
     }
+    if (streaming) return;
     scheduleSave();
   });
+
+  function streamBegin(fromIndex) {
+    streaming = true;
+    streamPos = fromIndex;
+    setStatus("building", "streaming…");
+    setError(null);
+    const pos = editor.posFromIndex(streamPos);
+    editor.setCursor(pos);
+    editor.scrollIntoView(pos, 80);
+  }
+
+  function streamChar(ch) {
+    if (!streaming) return;
+    const pos = editor.posFromIndex(streamPos);
+    editor.replaceRange(ch, pos, pos);
+    streamPos += ch.length;
+    const newPos = editor.posFromIndex(streamPos);
+    editor.setCursor(newPos);
+    editor.scrollIntoView(newPos, 80);
+  }
+
+  function streamEnd() {
+    streaming = false;
+    setStatus("idle", "streamed");
+  }
 
   function applyDoc({ content, path }) {
     if (path) filenameEl.textContent = path;
@@ -87,6 +115,12 @@
       } else if (msg.type === "render_failed") {
         setStatus("error", "build error");
         setError(msg.log || "tectonic failed");
+      } else if (msg.type === "stream_begin") {
+        streamBegin(msg.from_index);
+      } else if (msg.type === "stream_char") {
+        streamChar(msg.ch);
+      } else if (msg.type === "stream_end") {
+        streamEnd();
       }
     });
   }
