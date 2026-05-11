@@ -73,15 +73,20 @@ def ensure_server_running(wait_seconds: int = 6) -> dict[str, Any]:
 
 @define_tool
 def list_docs() -> dict[str, Any]:
-    """List all documents in the aTeXi docs/ folder.
+    """List all documents in the agenTeX docs/ folder.
 
-    Returns the names of every .tex and .bib file, plus which one is
-    currently active (visible in the editor) and which is the render
-    target (compiled when the user clicks Render). Use this to discover
-    what's available before switching.
+    Returns the names of every .tex, .bib, .md, and .txt file, plus
+    which one is currently active (visible in the editor) and which is
+    the render target (compiled or rendered when the user clicks
+    Render). Use this to discover what's available before switching.
+
+    File names are forward-slash relative paths under docs/ — e.g.
+    "current.tex" or "chapters/intro.tex". `dirs` lists every
+    subdirectory (including empty ones) so you can see the folder
+    structure even before placing docs in it.
 
     Returns:
-        {"names": [str], "active": str, "render_target": str}
+        {"names": [str], "dirs": [str], "active": str, "render_target": str}
     """
     r = requests.get(f"{ATEXI_BASE}/api/docs", timeout=10)
     r.raise_for_status()
@@ -90,16 +95,18 @@ def list_docs() -> dict[str, Any]:
 
 @define_tool
 def set_active_doc(name: str) -> dict[str, Any]:
-    """Switch the active aTeXi document to `name`.
+    """Switch the active agenTeX document to `name`.
 
     The active doc is what the editor displays and what edit_doc /
-    stream_edit operate on. If `name` is a .tex file, it also becomes
-    the render target. Switching to a .bib leaves the render target on
-    the previous .tex (so editing references still recompiles the
-    main draft when the user hits Render).
+    stream_edit operate on. If `name` is a .tex or .md file, it also
+    becomes the render target (.tex compiles via tectonic to PDF; .md
+    renders client-side to HTML with KaTeX math). Switching to a .bib
+    or .txt leaves the render target on the previous renderable so the
+    main draft still rebuilds when the user hits Render.
 
     Args:
-        name: filename in docs/ (e.g. "notes.tex" or "refs.bib").
+        name: forward-slash relative path under docs/ (e.g. "notes.tex",
+            "chapters/intro.tex", "refs.bib", "scratch.md", "notes.txt").
             Must already exist.
 
     Returns:
@@ -117,14 +124,18 @@ def set_active_doc(name: str) -> dict[str, Any]:
 
 @define_tool
 def new_doc(name: str, template: str = "", activate: bool = True) -> dict[str, Any]:
-    """Create a new document in aTeXi/docs/.
+    """Create a new document in agenTeX/docs/.
 
     Args:
-        name: filename including extension. Must end in .tex or .bib and
-            contain only [A-Za-z0-9._-] characters.
-        template: optional template filename from aTeXi/templates/. If
+        name: forward-slash relative path under docs/, including
+            extension. Each segment must contain only [A-Za-z0-9._-]
+            characters; the final segment must end in .tex, .bib, .md,
+            or .txt. Subdirectories (e.g. "chapters/intro.tex") are
+            auto-created on write — no separate mkdir step needed.
+        template: optional template filename from agenTeX/templates/. If
             empty, a minimal scaffold is used (\\documentclass...\\end{document}
-            for .tex, a comment header for .bib).
+            for .tex, a comment header for .bib, a single H1 for .md,
+            an empty file for .txt).
         activate: when True (default) the new file becomes the active
             doc immediately.
 
@@ -136,6 +147,45 @@ def new_doc(name: str, template: str = "", activate: bool = True) -> dict[str, A
     if template:
         payload["template"] = template
     r = requests.post(f"{ATEXI_BASE}/api/docs/new", json=payload, timeout=15)
+    if not r.ok:
+        return {"ok": False, "status": r.status_code, "error": r.text[:500]}
+    return r.json()
+
+
+@define_tool
+def move_doc(src: str, dest: str) -> dict[str, Any]:
+    """Move or rename a document or directory under aTeXi/docs/.
+
+    Works for both files and folders — pass a file path to rename or move
+    a single doc, or a folder path to rename/move the whole subtree. Parent
+    directories of `dest` are auto-created. The associated .build/ output
+    (PDF, log, or the whole BUILD subtree for a folder move) follows the
+    source, so re-renders don't orphan stale output.
+
+    Behavior on edge cases:
+        - Refuses to overwrite an existing destination (409).
+        - Refuses to move a folder into itself or its own descendant (400).
+        - Migrates state.active_doc and state.render_target if they point
+          at (or live inside) the moved entity, so the editor lands on the
+          new path without a flicker.
+
+    Args:
+        src: existing path under docs/ (e.g. "chapters/intro.tex" or
+            "chapters" for the folder itself).
+        dest: target path. For files, must end in .tex / .bib / .md / .txt
+            and follow the doc filename rules. For folders, no extension.
+            Each segment must contain only [A-Za-z0-9._-] characters.
+
+    Returns:
+        On success: {"ok": True, "src": str, "dest": str, "is_dir": bool}
+        On no-op (src == dest): adds {"noop": True}
+        On failure: {"ok": False, "status": int, "error": str}
+    """
+    r = requests.post(
+        f"{ATEXI_BASE}/api/docs/move",
+        json={"src": src, "dest": dest},
+        timeout=15,
+    )
     if not r.ok:
         return {"ok": False, "status": r.status_code, "error": r.text[:500]}
     return r.json()

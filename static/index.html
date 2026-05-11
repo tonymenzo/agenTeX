@@ -3,25 +3,54 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>aTeXi</title>
+    <title>agenTeX</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
     <link rel="stylesheet" href="/static/style.css" />
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/stex/stex.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/xml/xml.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/markdown/markdown.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/edit/matchbrackets.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/addon/selection/active-line.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/diff@7.0.0/dist/diff.min.js"></script>
   </head>
   <body>
     <header class="topbar">
       <button id="sidebar-toggle" class="icon-btn" type="button" aria-label="Toggle file list" title="Toggle file list">
         <span class="hamburger" aria-hidden="true"></span>
       </button>
-      <div class="brand">aTeXi</div>
+      <div class="brand">agenTeX</div>
       <div class="tabs" id="tabs" role="tablist"></div>
       <div class="actions">
-        <button id="render-btn" class="render-btn" type="button" title="Save and render (⌘S)">
-          Render
+        <button id="render-btn" class="topbar-btn" type="button" title="Save and render (⌘S)" aria-label="Render">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M 21 12 a 9 9 0 1 1 -3.7 -7.3" />
+            <polyline points="21 3 21 8 16 8" />
+          </svg>
+        </button>
+        <button id="cite-btn" class="topbar-btn" type="button" title="Insert citation (INSPIRE-HEP)" aria-label="Insert citation">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M 16 8 v 5 a 3 3 0 0 0 6 0 v -1 a 10 10 0 1 0 -3.92 7.94"/>
+          </svg>
+        </button>
+        <button id="timeline-btn" class="topbar-btn" type="button" title="History" aria-label="History">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="12 7 12 12 16 14"/>
+          </svg>
+        </button>
+        <button id="download-btn" class="topbar-btn" type="button" title="Download PDF" aria-label="Download PDF" disabled>
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M 21 15 v 4 a 2 2 0 0 1 -2 2 H 5 a 2 2 0 0 1 -2 -2 v -4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
         </button>
         <span class="status" id="status" data-state="idle">
           <span class="dot"></span>
@@ -33,7 +62,10 @@
       <aside id="sidebar" class="sidebar collapsed" aria-label="Files">
         <div class="sidebar-header">Files</div>
         <ul id="file-list" class="file-list"></ul>
-        <button id="new-doc" class="new-doc-btn" type="button">+ New document</button>
+        <div class="sidebar-actions">
+          <button id="new-doc" class="sidebar-btn" type="button">+ New document</button>
+          <button id="new-folder" class="sidebar-btn" type="button">+ New folder</button>
+        </div>
       </aside>
       <div class="split">
         <section class="pane editor-pane">

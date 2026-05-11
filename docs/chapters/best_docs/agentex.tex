@@ -4,7 +4,7 @@
 \usepackage{microtype}
 \usepackage{hyperref}
 
-\title{aTeXi \\ \large a live LaTeX surface}
+\title{agen\TeX \\[0.1in] \large a live LaTeX surface}
 \author{Tony Menzo}
 \date{\today}
 
@@ -18,7 +18,7 @@ directions through a small WebSocket on top of FastAPI.
 
 \section*{A few smoke tests}
 
-What's up dog how it this going on
+A handful of constructions, just to confirm the rendering pipeline survives them. dc
 
 Inline math should typeset cleanly, e.g.\ the QED Lagrangian
 $\mathcal{L} = -\tfrac{1}{4} F_{\mu\nu} F^{\mu\nu} + i\bar\psi\gamma^\mu D_\mu \psi - m\bar\psi\psi$.
@@ -27,6 +27,7 @@ Display math:
 \[
   \int_{-\infty}^{\infty} e^{-x^2}\, dx = \sqrt{\pi}.
 \]
+now i am editing
 
 An aligned derivation:
 \begin{align*}
@@ -36,6 +37,17 @@ An aligned derivation:
   \nabla \times \mathbf{B} &= \mu_0 \mathbf{J} + \mu_0 \varepsilon_0 \frac{\partial \mathbf{E}}{\partial t}.
 \end{align*}
 
+
+A $3\times 3$ matrix, with a determinant that gives it away:
+\[
+  M = \begin{pmatrix}
+    1 & 2 & 3 \\
+    4 & 5 & 6 \\
+    7 & 8 & 9
+  \end{pmatrix},
+  \qquad
+  \det(M) = 0.
+\]
 \section*{What works}
 
 \begin{itemize}
@@ -60,12 +72,25 @@ written once at the end, so tectonic renders a single time.
   T(n) = n \cdot \Delta t_{\text{char}} + T_{\text{tectonic}}.
 \]
 
+what is going on
+
+this is perfect
 
 
 \section*{Round trip}
 
-This block was streamed in at $\sim 20$\,ms per character, then tectonic compiled the page once at the end:
+This block was streamed in at $\sim 15$\,ms per character, then tectonic compiled the page once at the end:
 \[
   T_{\text{visible}} = N \,\Delta t_{\text{char}} + T_{\text{compile}}.
 \]
+A live edit from the agent: this line was added without any key touched
+on your end, and the page should have rendered automatically --- and on this render the
+PDF should have stayed where you'd scrolled it, not jumped to page one.
+
+The quick brown fox jumped over the gray lazy dog.
+
+
+I am editing
+
+what is going on
 \end{document}
