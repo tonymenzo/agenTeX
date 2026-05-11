@@ -13,13 +13,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Auto-load .env if python-dotenv is installed. We don't require dotenv as
+# a hard dependency — users can source the .env file in their shell instead.
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver
 
-log = logging.getLogger("atexi")
+log = logging.getLogger("agentex")
 
 ROOT = Path(__file__).parent
 DOCS = ROOT / "docs"
@@ -30,6 +38,9 @@ AGENTEX = ROOT / ".agentex"
 SNAPSHOTS = AGENTEX / "snapshots"
 TIMELINE_LOG = AGENTEX / "timeline.jsonl"
 AGENTEX_CONFIG = AGENTEX / "config.json"
+COMMENTS_FILE = AGENTEX / "comments.json"
+SPEND_LOG = AGENTEX / "spend.jsonl"
+COMMENT_CONTEXT_CHARS = 40  # chars of prefix/suffix stored for reanchoring
 DEFAULT_DOC_NAME = "current.tex"
 RENDER_DEBOUNCE = 0.4
 # A relative path under DOCS made of slash-separated segments. Each segment
@@ -140,6 +151,22 @@ class State:
         # Toggle for snapshot collection. Loaded from .agentex/config.json at
         # startup, persisted there when changed via the UI.
         self.timeline_enabled: bool = True
+        # Set when a client acks a save_now flush request. flush_clients()
+        # creates a fresh Event and awaits it (with timeout) so agent-facing
+        # reads see the user's in-flight keystrokes, not stale disk content.
+        self.flush_ack: asyncio.Event | None = None
+        # Persistent agent-authored comments, loaded from .agentex/comments.json.
+        # Each entry: {id, doc, kind, message, ts, author, resolved, ...anchor}
+        # where anchor depends on kind:
+        #   kind="range": from_line, to_line, from_ch, to_ch, excerpt, prefix, suffix
+        #   kind="line":  line, line_text
+        #   kind="doc":   (no positional fields)
+        # Edits on a doc trigger a reanchor pass which may set orphaned=True.
+        self.comments: list[dict] = []
+        # Monotonically incremented counter for comment IDs within a session.
+        # IDs are prefixed with a short random tag so they don't collide if
+        # the server is restarted mid-session.
+        self.comment_seq: int = 0
 
     async def broadcast(self, message: dict) -> None:
         dead = []
@@ -150,6 +177,27 @@ class State:
                 dead.append(ws)
         for ws in dead:
             self.clients.discard(ws)
+
+    async def flush_clients(self, timeout: float = 0.1) -> None:
+        """Ask any connected browser to commit its in-memory editor state to
+        disk before an agent-facing read. Closes the ~350ms debounced-save
+        race window between the user's keystrokes and an agent edit.
+
+        Returns when one client acks or after `timeout` seconds. No-op when
+        no clients are connected (nothing to flush)."""
+        if not self.clients:
+            return
+        self.flush_ack = asyncio.Event()
+        try:
+            await self.broadcast({"type": "save_now"})
+            try:
+                await asyncio.wait_for(self.flush_ack.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # No client responded in time. Could be the connection is
+                # stale, or the client has nothing pending. Proceed anyway.
+                pass
+        finally:
+            self.flush_ack = None
 
 
 state = State()
@@ -272,6 +320,129 @@ def _pick_fallback() -> tuple[Path, Path] | tuple[None, None]:
     renderables = [n for n in names if Path(n).suffix in RENDERABLE_SUFFIXES]
     render = DOCS / renderables[0] if renderables else active
     return active, render
+
+
+# ---------- comments ----------
+def load_comments() -> tuple[list[dict], int]:
+    """Return (comments, next_seq). Tolerates missing or malformed file."""
+    if not COMMENTS_FILE.exists():
+        return [], 0
+    try:
+        data = json.loads(COMMENTS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return [], 0
+    if not isinstance(data, dict):
+        return [], 0
+    comments = data.get("comments", [])
+    if not isinstance(comments, list):
+        comments = []
+    seq = int(data.get("next_seq", 0) or 0)
+    return comments, seq
+
+
+def save_comments() -> None:
+    AGENTEX.mkdir(parents=True, exist_ok=True)
+    payload = {"next_seq": state.comment_seq, "comments": state.comments}
+    tmp = COMMENTS_FILE.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(COMMENTS_FILE)
+    except OSError:
+        pass
+
+
+def next_comment_id() -> str:
+    state.comment_seq += 1
+    return f"c{state.comment_seq:04d}"
+
+
+def line_index_to_linecol(content: str, idx: int) -> tuple[int, int]:
+    """Convert a 0-based char offset to (1-based line, 0-based ch)."""
+    if idx <= 0:
+        return 1, 0
+    nl = content.count("\n", 0, idx)
+    line_start = content.rfind("\n", 0, idx) + 1
+    return nl + 1, idx - line_start
+
+
+def reanchor_comments_for_doc(doc_rel: str, content: str) -> bool:
+    """Re-find each non-doc-level comment for `doc_rel` in `content`. Updates
+    position fields in place. Returns True if any comment changed (so the
+    caller can broadcast)."""
+    changed = False
+    for c in state.comments:
+        if c.get("doc") != doc_rel:
+            continue
+        if c.get("kind") == "doc":
+            continue
+        if c.get("resolved"):
+            # Skip resolved — they're hidden by default; positions can drift.
+            continue
+        if c.get("kind") == "range":
+            excerpt = c.get("excerpt") or ""
+            prefix = c.get("prefix") or ""
+            suffix = c.get("suffix") or ""
+            needle = prefix + excerpt + suffix
+            idx = content.find(needle) if needle else -1
+            if idx >= 0:
+                idx += len(prefix)
+            elif excerpt:
+                # Fall back to excerpt-only match; only accept if unique.
+                first = content.find(excerpt)
+                second = content.find(excerpt, first + 1) if first >= 0 else -1
+                idx = first if (first >= 0 and second < 0) else -1
+            if idx < 0:
+                if not c.get("orphaned"):
+                    c["orphaned"] = True
+                    changed = True
+                continue
+            from_line, from_ch = line_index_to_linecol(content, idx)
+            to_line, to_ch = line_index_to_linecol(content, idx + len(excerpt))
+            if (c.get("from_line") != from_line or c.get("from_ch") != from_ch
+                    or c.get("to_line") != to_line or c.get("to_ch") != to_ch
+                    or c.get("orphaned")):
+                c["from_line"] = from_line
+                c["from_ch"] = from_ch
+                c["to_line"] = to_line
+                c["to_ch"] = to_ch
+                c["orphaned"] = False
+                changed = True
+        elif c.get("kind") == "line":
+            line_text = c.get("line_text") or ""
+            cur_line = int(c.get("line", 1))
+            lines = content.split("\n")
+            new_line = None
+            if 1 <= cur_line <= len(lines) and lines[cur_line - 1] == line_text:
+                new_line = cur_line
+            else:
+                # Look for the exact line text uniquely
+                hits = [i + 1 for i, ln in enumerate(lines) if ln == line_text]
+                if len(hits) == 1:
+                    new_line = hits[0]
+            if new_line is None:
+                if not c.get("orphaned"):
+                    c["orphaned"] = True
+                    changed = True
+                continue
+            if c.get("line") != new_line or c.get("orphaned"):
+                c["line"] = new_line
+                c["orphaned"] = False
+                changed = True
+    return changed
+
+
+async def broadcast_comments() -> None:
+    await state.broadcast({"type": "comments", "comments": state.comments})
+
+
+async def reanchor_and_broadcast(doc_rel: str, content: str) -> None:
+    """Convenience wrapper: reanchor for one doc, persist + broadcast if any
+    comment changed."""
+    if not any(c.get("doc") == doc_rel for c in state.comments):
+        return
+    if reanchor_comments_for_doc(doc_rel, content):
+        save_comments()
+        await broadcast_comments()
 
 
 # ---------- timeline / snapshots ----------
@@ -449,7 +620,17 @@ async def run_render() -> None:
     if proc.returncode != 0:
         err = (stderr or stdout).decode("utf-8", errors="replace")
         log.warning("render failed (rc=%d)", proc.returncode)
-        errors = parse_tectonic_errors(err)
+        # tectonic v2 -X compile prints a terse summary to stderr; the
+        # canonical LaTeX errors (! ... / l.NN ...) live in the .log
+        # sibling produced by --keep-logs.
+        parseable = err
+        log_path = out.with_suffix(".log")
+        if log_path.exists():
+            try:
+                parseable = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+        errors = parse_tectonic_errors(parseable)
         await state.broadcast(
             {"type": "render_failed", "log": err, "errors": errors}
         )
@@ -764,6 +945,7 @@ async def lifespan(app: FastAPI):
     _bootstrap_active_and_target()
     gc_build_dir()
     state.timeline_enabled = load_timeline_pref()
+    state.comments, state.comment_seq = load_comments()
     if state.active_doc.exists():
         state.last_hash = sha(state.active_doc.read_bytes())
     observer = PollingObserver(timeout=0.3)
@@ -811,6 +993,7 @@ async def get_doc() -> dict:
 async def get_doc_agent() -> dict:
     """Agent-side doc fetch. Returns content, hash, and user_edited_since
     flag, then resets the flag (the agent has now seen the user's edits)."""
+    await state.flush_clients()
     flag = consume_user_edit_flag()
     active_rel = rel_name(state.active_doc)
     if not state.active_doc.exists():
@@ -1140,7 +1323,7 @@ async def _http_get(url: str, accept: str = "application/json") -> tuple[int, by
     just for two endpoints."""
     def _do():
         req = urllib.request.Request(
-            url, headers={"Accept": accept, "User-Agent": "aTeXi/1.0"}
+            url, headers={"Accept": accept, "User-Agent": "agentex/1.0"}
         )
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -1213,6 +1396,24 @@ def _pick_bib_destination() -> Path:
     if not default.exists():
         default.write_text(_TEMPLATE_BIB, encoding="utf-8")
     return default
+
+
+@app.get("/api/bibkeys")
+async def get_bibkeys() -> dict:
+    """Return every BibTeX key across all .bib files under docs/. Used by the
+    editor's cite-as-you-type hint to surface local entries before INSPIRE."""
+    keys: list[dict] = []
+    for name in list_doc_names():
+        if not name.endswith(".bib"):
+            continue
+        p = DOCS / name
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for m in _BIBTEX_KEY_RE.finditer(text):
+            keys.append({"key": m.group(1), "file": name})
+    return {"keys": keys}
 
 
 @app.get("/api/inspire/search")
@@ -1420,6 +1621,7 @@ async def stream(payload: dict) -> dict:
         except (TypeError, ValueError):
             raise HTTPException(400, "after_line must be an int")
 
+    await state.flush_clients()
     if not state.active_doc.exists():
         raise HTTPException(404, "no active doc")
     content = state.active_doc.read_text(encoding="utf-8")
@@ -1451,6 +1653,14 @@ async def stream(payload: dict) -> dict:
             "hash": state.last_hash,
         }
     )
+    await state.broadcast(
+        {
+            "type": "agent_edit_range",
+            "from_index": insert_index,
+            "to_index": insert_index + len(text),
+        }
+    )
+    await reanchor_and_broadcast(rel_name(state.active_doc), new_content)
     schedule_render()
     return {
         "ok": True,
@@ -1469,6 +1679,7 @@ async def _commit_and_broadcast(new_content: str) -> str:
     await state.broadcast(
         {"type": "doc", "content": new_content, "path": rel_name(state.active_doc), "hash": h}
     )
+    await reanchor_and_broadcast(rel_name(state.active_doc), new_content)
     schedule_render()
     return h
 
@@ -1490,6 +1701,7 @@ async def edit_doc(payload: dict) -> dict:
     stream_mode = bool(payload.get("stream", False))
     delay_ms = max(0, int(payload.get("delay_ms", 15)))
 
+    await state.flush_clients()
     if not state.active_doc.exists():
         raise HTTPException(404, "no active doc")
     content = state.active_doc.read_text(encoding="utf-8")
@@ -1528,6 +1740,13 @@ async def edit_doc(payload: dict) -> dict:
         )
         await _commit_and_broadcast(new_content)
 
+    await state.broadcast(
+        {
+            "type": "agent_edit_range",
+            "from_index": idx,
+            "to_index": idx + len(replace_text),
+        }
+    )
     return {
         "ok": True,
         "from_index": idx,
@@ -1535,6 +1754,362 @@ async def edit_doc(payload: dict) -> dict:
         "chars": len(replace_text),
         "user_edited_since": consume_user_edit_flag(),
     }
+
+
+# ---------- comments API ----------
+@app.get("/api/comments")
+async def get_comments(
+    doc: str = "",
+    include_resolved: bool = True,
+    author: str = "",
+    pending_only: bool = False,
+) -> dict:
+    """List comments.
+
+    `pending_only` returns only comments that don't yet have a child reply
+    by ANY other author. Combined with `author="user"`, this is the
+    "what's waiting for me to answer" view for the agent.
+    """
+    items = state.comments
+    if doc:
+        items = [c for c in items if c.get("doc") == doc]
+    if author:
+        items = [c for c in items if c.get("author") == author]
+    if not include_resolved:
+        items = [c for c in items if not c.get("resolved")]
+    if pending_only:
+        # A comment is "pending" when no reply by a different author exists.
+        has_reply_by_other = {}
+        for c in state.comments:
+            pid = c.get("parent_id")
+            if not pid:
+                continue
+            parent_author = next(
+                (p.get("author") for p in state.comments if p.get("id") == pid),
+                None,
+            )
+            if parent_author and c.get("author") != parent_author:
+                has_reply_by_other[pid] = True
+        items = [c for c in items if not has_reply_by_other.get(c.get("id"))]
+    return {"comments": items}
+
+
+@app.post("/api/comments")
+async def post_comment(payload: dict) -> dict:
+    """Create a new comment. Anchor is determined by what fields are given:
+      - excerpt set: find unique occurrence in the active doc -> range anchor
+      - line set (>=1): line anchor
+      - neither: doc-level anchor
+    For range and line anchors, doc defaults to state.active_doc; can override
+    by passing `doc` explicitly.
+    """
+    message = payload.get("message")
+    if not isinstance(message, str) or not message.strip():
+        raise HTTPException(400, "message required")
+    message = message.strip()
+    doc_rel = payload.get("doc") or rel_name(state.active_doc)
+    if not isinstance(doc_rel, str):
+        raise HTTPException(400, "doc must be a string")
+    target = DOCS / doc_rel
+    if not target.exists() or not target.is_file():
+        raise HTTPException(404, f"no such doc: {doc_rel}")
+    excerpt = payload.get("excerpt")
+    line_arg = payload.get("line")
+    author = payload.get("author") or "agent"
+    parent_id = payload.get("parent_id")
+
+    # Replies inherit their anchor from the parent comment. The thread
+    # follows the parent's text; replies don't get their own gutter dot.
+    parent = None
+    if isinstance(parent_id, str) and parent_id:
+        for cm in state.comments:
+            if cm.get("id") == parent_id:
+                parent = cm
+                break
+        if parent is None:
+            raise HTTPException(404, f"parent comment {parent_id} not found")
+        if parent.get("doc") != doc_rel:
+            # Force doc to match the parent's
+            doc_rel = parent["doc"]
+            target = DOCS / doc_rel
+
+    content = target.read_text(encoding="utf-8")
+    entry: dict = {
+        "id": next_comment_id(),
+        "doc": doc_rel,
+        "message": message,
+        "author": author,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "resolved": False,
+        "orphaned": False,
+        "parent_id": parent_id if parent else None,
+    }
+
+    if parent is not None:
+        # Replies inherit kind + anchor from the parent so they travel
+        # together if the parent re-anchors later. Replies are never
+        # surfaced in the gutter; sidebar shows them indented.
+        entry["kind"] = "reply"
+        entry["parent_kind"] = parent.get("kind")
+    elif isinstance(excerpt, str) and excerpt:
+        idx = content.find(excerpt)
+        if idx < 0:
+            raise HTTPException(404, "excerpt not found in document")
+        if content.find(excerpt, idx + 1) >= 0:
+            raise HTTPException(409, "excerpt is not unique; add more context")
+        prefix = content[max(0, idx - COMMENT_CONTEXT_CHARS):idx]
+        suffix = content[idx + len(excerpt):idx + len(excerpt) + COMMENT_CONTEXT_CHARS]
+        from_line, from_ch = line_index_to_linecol(content, idx)
+        to_line, to_ch = line_index_to_linecol(content, idx + len(excerpt))
+        entry.update({
+            "kind": "range",
+            "excerpt": excerpt,
+            "prefix": prefix,
+            "suffix": suffix,
+            "from_line": from_line,
+            "from_ch": from_ch,
+            "to_line": to_line,
+            "to_ch": to_ch,
+        })
+    elif isinstance(line_arg, int) and line_arg >= 1:
+        lines = content.split("\n")
+        if line_arg > len(lines):
+            raise HTTPException(404, f"line {line_arg} out of range (doc has {len(lines)} lines)")
+        entry.update({
+            "kind": "line",
+            "line": line_arg,
+            "line_text": lines[line_arg - 1],
+        })
+    else:
+        entry["kind"] = "doc"
+
+    state.comments.append(entry)
+    save_comments()
+    await broadcast_comments()
+    return {"ok": True, "comment": entry}
+
+
+@app.post("/api/comments/{comment_id}/resolve")
+async def post_resolve_comment(comment_id: str, payload: dict | None = None) -> dict:
+    resolved = True
+    if isinstance(payload, dict) and "resolved" in payload:
+        resolved = bool(payload["resolved"])
+    for c in state.comments:
+        if c.get("id") == comment_id:
+            c["resolved"] = resolved
+            save_comments()
+            await broadcast_comments()
+            return {"ok": True, "comment": c}
+    raise HTTPException(404, "comment not found")
+
+
+def _find_comment(comment_id: str) -> dict | None:
+    for c in state.comments:
+        if c.get("id") == comment_id:
+            return c
+    return None
+
+
+def _thread_root_id(comment_id: str) -> str:
+    """Walk parent_id chain up to the root. Cycles are guarded by max depth."""
+    current = comment_id
+    for _ in range(32):
+        c = _find_comment(current)
+        if not c:
+            return current
+        parent = c.get("parent_id")
+        if not parent:
+            return current
+        current = parent
+    return current
+
+
+def _format_thread_for_prompt(root_id: str, target_id: str) -> str:
+    thread = [c for c in state.comments
+              if c.get("id") == root_id or c.get("parent_id") == root_id]
+    thread.sort(key=lambda c: c.get("ts", ""))
+    lines: list[str] = []
+    for c in thread:
+        marker = "  [respond to this]" if c.get("id") == target_id else ""
+        author = c.get("author", "?")
+        lines.append(f"{author}: {c.get('message', '')}{marker}")
+    return "\n".join(lines)
+
+
+def _format_anchor_for_prompt(root: dict, doc_content: str) -> str:
+    kind = root.get("kind")
+    if kind == "range":
+        return f"anchored to the passage: {root.get('excerpt', '')!r}"
+    if kind == "line":
+        return f"anchored to line {root.get('line')}: {root.get('line_text', '')!r}"
+    return "anchored to the document as a whole"
+
+
+# Provider name -> (orchestral attribute, default model, expected api-key env var)
+_LLM_PROVIDERS = {
+    "anthropic": ("Claude", "claude-sonnet-4-5", "ANTHROPIC_API_KEY"),
+    "openai": ("GPT", "gpt-4o-mini", "OPENAI_API_KEY"),
+    "google": ("Gemini", "gemini-2.0-flash-exp", "GOOGLE_API_KEY"),
+    "groq": ("Groq", "llama-3.3-70b-versatile", "GROQ_API_KEY"),
+    "mistral": ("MistralAI", "mistral-large-latest", "MISTRAL_API_KEY"),
+    "ollama": ("Ollama", "llama3.1", ""),  # local, no key
+    "bedrock": ("Bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0", "AWS_ACCESS_KEY_ID"),
+    "vllm": ("VLLM", "", ""),
+}
+
+
+def _selected_provider() -> str:
+    return (os.environ.get("AGENTEX_API_PROVIDER") or "anthropic").lower()
+
+
+def _selected_model() -> str:
+    model = os.environ.get("AGENTEX_API_MODEL")
+    if model:
+        return model
+    prov = _selected_provider()
+    if prov in _LLM_PROVIDERS:
+        return _LLM_PROVIDERS[prov][1]
+    return ""
+
+
+def _api_key_present() -> bool:
+    prov = _selected_provider()
+    if prov not in _LLM_PROVIDERS:
+        return False
+    key_var = _LLM_PROVIDERS[prov][2]
+    if not key_var:
+        return True  # provider doesn't need a key (e.g., local Ollama)
+    return bool(os.environ.get(key_var))
+
+
+def _make_llm_client():
+    """Lazily construct an orchestral LLM client from env config. Raises
+    ValueError on misconfiguration; callers surface as 503."""
+    prov = _selected_provider()
+    if prov not in _LLM_PROVIDERS:
+        raise ValueError(
+            f"AGENTEX_API_PROVIDER={prov!r} is not one of "
+            f"{', '.join(sorted(_LLM_PROVIDERS))}"
+        )
+    attr, default_model, _ = _LLM_PROVIDERS[prov]
+    model = _selected_model() or default_model
+    try:
+        import orchestral.llm as ollm
+    except ImportError as e:
+        raise ValueError(f"orchestral not installed: {e}")
+    Provider = getattr(ollm, attr)
+    return Provider(model=model)
+
+
+@app.post("/api/comments/{comment_id}/respond")
+async def respond_to_comment(comment_id: str) -> dict:
+    """Generate an agent reply to a user comment via the configured LLM
+    provider (orchestral). The reply is posted as a thread reply under
+    the conversation's root comment. Returns 503 when the provider's API
+    key is not set — callers can degrade to the Claude Code/Desktop path."""
+    if not _api_key_present():
+        prov = _selected_provider()
+        key_var = _LLM_PROVIDERS.get(prov, (None, None, ""))[2]
+        raise HTTPException(
+            503,
+            f"{key_var or 'API key'} not set for provider {prov!r}",
+        )
+
+    target = _find_comment(comment_id)
+    if not target:
+        raise HTTPException(404, f"comment {comment_id} not found")
+
+    doc_rel = target.get("doc", "")
+    doc_path = DOCS / doc_rel
+    doc_content = doc_path.read_text(encoding="utf-8") if doc_path.exists() else ""
+
+    root_id = _thread_root_id(comment_id)
+    root = _find_comment(root_id) or target
+    anchor_desc = _format_anchor_for_prompt(root, doc_content)
+    thread_text = _format_thread_for_prompt(root_id, comment_id)
+
+    system_prompt = (
+        "You are reviewing a LaTeX document inside agenTeX, a live writing "
+        "interface. The user has left a comment on a passage and is asking "
+        "for your reply. Respond conversationally and substantively. Keep "
+        "responses concise (a few sentences to a short paragraph). Do NOT "
+        "modify the document — your reply will be posted as a comment "
+        "thread reply, not as an edit."
+    )
+
+    user_prompt = (
+        f"<document path=\"{doc_rel}\">\n{doc_content}\n</document>\n\n"
+        f"Comment thread {anchor_desc}.\n\n"
+        f"Thread so far:\n{thread_text}"
+    )
+
+    try:
+        from orchestral.context import Context
+        from orchestral.context.message import Message
+        client = _make_llm_client()
+    except (ImportError, ValueError) as e:
+        raise HTTPException(503, str(e))
+
+    ctx = Context(system_prompt=system_prompt)
+    ctx.add_message(Message(role="user", text=user_prompt))
+
+    try:
+        resp = await asyncio.to_thread(client.get_response, ctx)
+    except Exception as e:
+        raise HTTPException(502, f"LLM call failed: {e}")
+
+    reply_text = (getattr(resp.message, "text", "") or "").strip()
+    if not reply_text:
+        raise HTTPException(502, "LLM returned empty content")
+
+    reply_entry = {
+        "id": next_comment_id(),
+        "doc": doc_rel,
+        "message": reply_text,
+        "author": "agent",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "resolved": False,
+        "orphaned": False,
+        "parent_id": root_id,
+        "kind": "reply",
+        "parent_kind": root.get("kind"),
+    }
+    state.comments.append(reply_entry)
+    save_comments()
+    await broadcast_comments()
+    return {"ok": True, "comment": reply_entry}
+
+
+@app.get("/api/config")
+async def get_config() -> dict:
+    """Feature flags + LLM selection surfaced to the frontend."""
+    return {
+        "api_response_enabled": _api_key_present(),
+        "api_provider": _selected_provider(),
+        "api_model": _selected_model(),
+    }
+
+
+@app.get("/api/config/models")
+async def get_available_models() -> dict:
+    """Catalog of providers + models supported by orchestral. Lets the
+    frontend surface a model picker."""
+    try:
+        from orchestral.llm import get_available_models as _avail
+        return {"providers": _avail()}
+    except Exception as e:
+        return {"providers": {}, "error": str(e)}
+
+
+@app.delete("/api/comments/{comment_id}")
+async def delete_comment(comment_id: str) -> dict:
+    for i, c in enumerate(state.comments):
+        if c.get("id") == comment_id:
+            removed = state.comments.pop(i)
+            save_comments()
+            await broadcast_comments()
+            return {"ok": True, "removed": removed["id"]}
+    raise HTTPException(404, "comment not found")
 
 
 @app.websocket("/ws")
@@ -1562,6 +2137,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 }
             )
         await broadcast_existing_render(ws=ws)
+        await ws.send_json({"type": "comments", "comments": state.comments})
         while True:
             msg = await ws.receive_json()
             kind = msg.get("type")
@@ -1572,6 +2148,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                     continue
                 state.active_doc.write_bytes(data)
                 state.last_hash = sha(data)
+                await reanchor_and_broadcast(rel_name(state.active_doc), content)
                 state.user_edits_pending = True
                 state.last_edit_author = "user"
                 # Deliberately NOT scheduling a render here. The user must
@@ -1579,6 +2156,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 # 'render' message), so typing doesn't thrash tectonic.
             elif kind == "render":
                 schedule_render()
+            elif kind == "save_now_ack":
+                if state.flush_ack is not None:
+                    state.flush_ack.set()
             elif kind == "ping":
                 await ws.send_json({"type": "pong"})
     except WebSocketDisconnect:
@@ -1593,6 +2173,6 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    host = os.environ.get("ATEXI_HOST", "127.0.0.1")
-    port = int(os.environ.get("ATEXI_PORT", "8000"))
+    host = os.environ.get("AGENTEX_HOST", "127.0.0.1")
+    port = int(os.environ.get("AGENTEX_PORT", "8000"))
     uvicorn.run(app, host=host, port=port, log_level="info")

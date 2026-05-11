@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/atexi_steer.py"
+            "command": "python3 .claude/hooks/agentex_steer.py"
           },
           {
             "type": "command",

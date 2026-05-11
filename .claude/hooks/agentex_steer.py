@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Steer agent edits on agenTeX/docs/*.{tex,bib,md} toward the MCP tools.
+"""Steer agent edits on agentex/docs/*.{tex,bib,md} toward the MCP tools.
 
 Blocks native Edit/Write/MultiEdit when the target is a managed doc
-under docs/, with a message redirecting the agent to mcp__atexi__edit_doc
-or mcp__atexi__stream_edit. Native tools write to disk but don't
-broadcast, so the user's browser editor would silently fall out of sync.
+under docs/, with a message redirecting the agent to
+mcp__agenTeX__EditDoc or mcp__agenTeX__StreamEdit. Native
+tools write to disk but don't broadcast, so the user's browser editor
+would silently fall out of sync.
 
 To disable: remove this hook's entry from .claude/settings.json.
 """
@@ -49,9 +50,9 @@ def main() -> int:
         f"BLOCKED: {resolved.name} is part of agenTeX's live document set "
         "and the user is watching it in a browser editor. Native Edit/Write "
         "tools write to disk silently --- the user's editor will not update. "
-        "Use `mcp__atexi__edit_doc` for find/replace edits, or "
-        "`mcp__atexi__stream_edit` for inserts/appends. Both broadcast to "
-        "the browser over the same WebSocket."
+        "Use `mcp__agenTeX__EditDoc` for find/replace edits, or "
+        "`mcp__agenTeX__StreamEdit` for inserts/appends. Both "
+        "broadcast to the browser over the same WebSocket."
     )
     out = {
         "decision": "block",

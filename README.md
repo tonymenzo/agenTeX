@@ -1,11 +1,11 @@
-# aTeXi
+# agenTeX
 
 Live LaTeX rendering interface for working alongside Claude Code. Edit in the browser or from your terminal, see the PDF update in real time, swap in templates as you go.
 
 ## Setup
 
 ```bash
-conda activate atexi
+conda activate agentex
 python server.py
 ```
 

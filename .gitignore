@@ -11,3 +11,5 @@ __pycache__/
 *.toc
 *.synctex.gz
 .DS_Store
+.env
+.claude/settings.local.json
