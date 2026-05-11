@@ -1,18 +1,22 @@
-"""MCP server entry point for aTeXi.
+"""MCP server entry point for agenTeX.
 
-Exposes the orchestral-defined tools in tools/atexi.py to Claude Code via
+Exposes the orchestral-defined tools in tools/agentex.py to Claude Code via
 stdio MCP. Configured in .mcp.json at the project root.
 """
 from __future__ import annotations
 
 from orchestral.mcp import MCPServer
 
-from tools.atexi import (
+from tools.agentex import (
+    add_comment,
+    delete_comment,
     edit_doc,
     ensure_server_running,
+    list_comments,
     list_docs,
     new_doc,
     read_doc,
+    resolve_comment,
     set_active_doc,
     stream_edit,
 )
@@ -28,10 +32,14 @@ def main() -> None:
             read_doc,
             edit_doc,
             stream_edit,
+            add_comment,
+            list_comments,
+            resolve_comment,
+            delete_comment,
         ],
-        name="atexi",
+        name="agenTeX",
         version="0.1.0",
-        use_display_names=False,
+        use_display_names=True,
     ).run()
 
 

@@ -8,6 +8,14 @@
   const downloadBtn = $("download-btn");
   const timelineBtn = $("timeline-btn");
   const citeBtn = $("cite-btn");
+  const commentsBtn = $("comments-btn");
+  const commentsBadge = $("comments-badge");
+  const commentsPanel = $("comments-panel");
+  const commentsListEl = $("comments-list");
+  const commentsEmptyEl = $("comments-empty");
+  const commentsCloseBtn = $("comments-close");
+  const commentsShowResolved = $("comments-show-resolved");
+  const linePopupEl = $("line-popup");
   const tabsEl = $("tabs");
   const sidebarEl = $("sidebar");
   const sidebarToggle = $("sidebar-toggle");
@@ -15,7 +23,7 @@
   const newDocBtn = $("new-doc");
   const newFolderBtn = $("new-folder");
 
-  const STORAGE_PREFIX = "atexi:";
+  const STORAGE_PREFIX = "agentex:";
   const lsGet = (k, fallback) => {
     try { const v = localStorage.getItem(STORAGE_PREFIX + k); return v == null ? fallback : JSON.parse(v); }
     catch { return fallback; }
@@ -665,6 +673,138 @@
 
   citeBtn.addEventListener("click", openCiteModal);
 
+  // ---------- cite-as-you-type ----------
+  // While the cursor is inside \cite{...}, surface local .bib keys + INSPIRE
+  // results in a CodeMirror hint dropdown. Selecting an INSPIRE result also
+  // appends the BibTeX entry to the active bib (via /api/inspire/cite).
+  const CITE_MACRO_RE = /\\cite[a-z]*\*?(?:\[[^\]]*\])?\{([^}]*)$/i;
+  let bibKeys = [];
+  const inspireCache = new Map();
+
+  async function refreshBibKeys() {
+    try {
+      const r = await fetch("/api/bibkeys");
+      if (!r.ok) return;
+      const data = await r.json();
+      bibKeys = Array.isArray(data.keys) ? data.keys : [];
+    } catch {
+      // network hiccup; keep stale cache
+    }
+  }
+  refreshBibKeys();
+
+  function inspireSearch(q) {
+    if (inspireCache.has(q)) return inspireCache.get(q);
+    const p = fetch(`/api/inspire/search?q=${encodeURIComponent(q)}&limit=8`)
+      .then((r) => (r.ok ? r.json() : { results: [] }))
+      .then((d) => d.results || [])
+      .catch(() => []);
+    inspireCache.set(q, p);
+    if (inspireCache.size > 64) {
+      inspireCache.delete(inspireCache.keys().next().value);
+    }
+    return p;
+  }
+
+  function renderCiteHint(el, _data, completion) {
+    el.classList.add("cite-hint-item");
+    if (completion.source) el.classList.add("cite-hint-" + completion.source);
+    const key = document.createElement("div");
+    key.className = "cite-hint-key";
+    key.textContent = completion.displayText || completion.text;
+    el.appendChild(key);
+    if (completion.subLabel) {
+      const sub = document.createElement("div");
+      sub.className = "cite-hint-sub";
+      sub.textContent = completion.subLabel;
+      el.appendChild(sub);
+    }
+  }
+
+  function insertInspireCite(cm, self, data) {
+    cm.replaceRange(data.text, self.from, self.to, "+complete");
+    if (!data.recid) return;
+    fetch("/api/inspire/cite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recid: data.recid }),
+    }).catch((e) => console.warn("cite append failed", e));
+  }
+
+  function citeHint(cm, callback) {
+    const cursor = cm.getCursor();
+    const lineText = cm.getLine(cursor.line).slice(0, cursor.ch);
+    const m = lineText.match(CITE_MACRO_RE);
+    if (!m) {
+      callback(null);
+      return;
+    }
+    const argText = m[1];
+    const lastComma = argText.lastIndexOf(",");
+    const partial = argText.slice(lastComma + 1).replace(/^\s+/, "");
+    const partialStart = {
+      line: cursor.line,
+      ch: cursor.ch - partial.length,
+    };
+    const needle = partial.toLowerCase();
+    const local = bibKeys
+      .filter((k) => !needle || k.key.toLowerCase().includes(needle))
+      .slice(0, 10)
+      .map((k) => ({
+        text: k.key,
+        displayText: k.key,
+        subLabel: `local · ${k.file}`,
+        source: "local",
+        render: renderCiteHint,
+      }));
+
+    if (partial.length < 2) {
+      callback({ list: local, from: partialStart, to: cursor });
+      return;
+    }
+
+    inspireSearch(partial).then((results) => {
+      const seen = new Set(local.map((l) => l.text));
+      const inspire = results
+        .filter((r) => r.texkey && !seen.has(r.texkey))
+        .map((r) => {
+          const authors = (r.authors || []).join(", ");
+          const more = r.n_more_authors ? ` +${r.n_more_authors}` : "";
+          const head = r.year ? `${r.year} · ` : "";
+          return {
+            text: r.texkey,
+            displayText: r.texkey,
+            subLabel: `inspire · ${head}${authors}${more}`.slice(0, 90),
+            source: "inspire",
+            recid: r.recid,
+            render: renderCiteHint,
+            hint: insertInspireCite,
+          };
+        });
+      callback({
+        list: [...local, ...inspire],
+        from: partialStart,
+        to: cursor,
+      });
+    });
+  }
+  citeHint.async = true;
+
+  function maybeShowCiteHint() {
+    if (!activeName || activeName.endsWith(".bib") || activeName.endsWith(".txt")) {
+      return;
+    }
+    if (editor.state.completionActive) return;
+    const cursor = editor.getCursor();
+    const lineText = editor.getLine(cursor.line).slice(0, cursor.ch);
+    if (!CITE_MACRO_RE.test(lineText)) return;
+    editor.showHint({
+      hint: citeHint,
+      completeSingle: false,
+      closeCharacters: /[\s}]/,
+    });
+  }
+
   let activeContextMenu = null;
   function closeContextMenu() {
     if (activeContextMenu) {
@@ -1131,7 +1271,7 @@
 
   const editor = CodeMirror.fromTextArea($("editor"), {
     mode: "stex",
-    theme: "atexi",
+    theme: "agentex",
     lineNumbers: true,
     lineWrapping: true,
     indentUnit: 2,
@@ -1139,9 +1279,10 @@
     matchBrackets: true,
     styleActiveLine: true,
     autofocus: true,
+    gutters: ["agentex-marks", "CodeMirror-linenumbers"],
   });
 
-  editor.on("change", () => {
+  editor.on("change", (_cm, change) => {
     if (suppressNextChange) {
       suppressNextChange = false;
       return;
@@ -1150,6 +1291,9 @@
     scheduleSave();
     unrendered = true;
     setStatus("modified", "modified");
+    if (change && change.origin !== "+complete" && change.origin !== "setValue") {
+      maybeShowCiteHint();
+    }
   });
 
   function streamBegin(fromIndex, toIndex) {
@@ -1218,8 +1362,65 @@
     console.log("preview class =", previewEl.className);
   };
 
+  // editorActiveDoc tracks what's currently *loaded in the editor*, distinct
+  // from `activeName` which can be updated by an early doc_list message
+  // before the matching doc-content broadcast arrives. The cursor stash uses
+  // this so a tab switch always captures the outgoing doc's state.
+  let editorActiveDoc = null;
+  const docViewState = new Map();
+  function snapshotViewState(name) {
+    if (!name) return;
+    try {
+      docViewState.set(name, {
+        cursor: editor.getCursor(),
+        scroll: editor.getScrollInfo(),
+        selections: editor.listSelections(),
+      });
+    } catch {
+      // editor not ready yet — fine to skip
+    }
+  }
+  function restoreViewState(name) {
+    const s = docViewState.get(name);
+    if (!s) {
+      editor.setCursor({ line: 0, ch: 0 });
+      editor.scrollTo(0, 0);
+      editor.focus();
+      return;
+    }
+    // setCursor reliably lands the blinking caret. setSelections additionally
+    // restores any range selection the user had. Scroll comes last so any
+    // auto-scroll triggered by the cursor update gets overridden.
+    if (s.cursor) {
+      try {
+        editor.setCursor(s.cursor);
+      } catch {
+        editor.setCursor({ line: 0, ch: 0 });
+      }
+    }
+    if (s.selections && s.selections.length > 0) {
+      const r = s.selections[0];
+      if (r && r.anchor && r.head &&
+          (r.anchor.line !== r.head.line || r.anchor.ch !== r.head.ch)) {
+        try {
+          editor.setSelections(s.selections);
+        } catch {
+          // fall through; cursor already restored above
+        }
+      }
+    }
+    if (s.scroll) editor.scrollTo(s.scroll.left, s.scroll.top);
+    // CodeMirror only renders the blinking caret when the editor is focused.
+    // Clicking a tab moves focus to the button — return it to the editor.
+    editor.focus();
+  }
+
   function applyDoc({ content, path }) {
-    if (path && path !== activeName) {
+    const switching = path && path !== editorActiveDoc;
+    if (switching) {
+      // Save the outgoing doc's cursor + scroll so coming back lands you
+      // where you left off rather than at {0,0}.
+      snapshotViewState(editorActiveDoc);
       activeName = path;
       ensureTab(path);
       renderTabs();
@@ -1232,11 +1433,26 @@
     const sameContent = editor.getValue() === content;
     if (!sameContent) {
       suppressNextChange = true;
-      const cursor = editor.getCursor();
-      const scroll = editor.getScrollInfo();
-      editor.setValue(content);
-      editor.setCursor(cursor);
-      editor.scrollTo(scroll.left, scroll.top);
+      if (switching) {
+        editor.setValue(content);
+        restoreViewState(path);
+      } else {
+        // Same doc, content changed externally (agent edit, rewind, etc).
+        // Preserve the user's current view rather than restoring a stash.
+        const cursor = editor.getCursor();
+        const scroll = editor.getScrollInfo();
+        editor.setValue(content);
+        editor.setCursor(cursor);
+        editor.scrollTo(scroll.left, scroll.top);
+      }
+    }
+    if (path) editorActiveDoc = path;
+    // The gutter dots and sidebar are scoped to the active doc, so a switch
+    // means re-rendering both even though `allComments` itself didn't change.
+    if (switching) {
+      applyCommentMarkers();
+      renderCommentsPanel();
+      updateCommentsBadge();
     }
     // If a synctex inverse-search asked us to jump to a different doc, the
     // switch + load arrives here. Fire the deferred jump now that the new
@@ -1488,6 +1704,11 @@
     });
     socket.addEventListener("message", (e) => {
       const msg = JSON.parse(e.data);
+      if (msg.type === "doc" && typeof msg.path === "string" && msg.path.endsWith(".bib")) {
+        refreshBibKeys();
+      } else if (msg.type === "doc_list") {
+        refreshBibKeys();
+      }
       if (msg.type === "doc_list") {
         applyDocList(msg);
       } else if (msg.type === "rename") {
@@ -1522,6 +1743,21 @@
         streamChar(msg.ch);
       } else if (msg.type === "stream_end") {
         streamEnd();
+      } else if (msg.type === "agent_edit_range") {
+        markAgentEdit(msg.from_index, msg.to_index);
+      } else if (msg.type === "comments") {
+        applyComments(msg.comments || []);
+      } else if (msg.type === "save_now") {
+        // Server is about to do an agent-facing read; flush our debounce
+        // timer immediately so any in-flight keystrokes hit disk first.
+        if (saveTimer) {
+          clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "save", content: editor.getValue() }));
+          socket.send(JSON.stringify({ type: "save_now_ack" }));
+        }
       }
     });
   }
@@ -1642,27 +1878,689 @@
   });
   paneResizeObserver.observe(previewEl);
 
-  // ---------- inline tectonic error markers ----------
+  // ---------- comments ----------
+  // Server-authored comments (currently agent-only). Each comment is anchored
+  // to a range, a line, or the whole doc, and surfaces in two places: the
+  // editor gutter (a yellow dot on the line) and the right-side sidebar.
+  let allComments = [];
+
+  function openCommentInSidebar(id) {
+    commentsPanel.hidden = false;
+    renderCommentsPanel();
+    requestAnimationFrame(() => {
+      const row = commentsListEl.querySelector(
+        `.comment-row[data-comment-id="${CSS.escape(id)}"]`,
+      );
+      if (!row) return;
+      const msg = row.querySelector(".comment-msg");
+      const more = row.querySelector(".comment-show-more");
+      if (msg && msg.classList.contains("clamped")) {
+        msg.classList.remove("clamped");
+        if (more) more.textContent = "Show less";
+      }
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      row.classList.add("comment-row-flash");
+      setTimeout(() => row.classList.remove("comment-row-flash"), 900);
+    });
+  }
+
+  function applyCommentMarkers() {
+    // Comments share the gutter with tectonic errors. Delegate to
+    // applyLineMarks so each line gets ONE marker reflecting the union of
+    // both annotation types — single dot, overlapping pair, or hollow ring.
+    applyLineMarks();
+  }
+
+  function flashCommentRange(c) {
+    if (c.kind === "range" &&
+        typeof c.from_line === "number" && typeof c.to_line === "number") {
+      const from = { line: c.from_line - 1, ch: c.from_ch || 0 };
+      const to = { line: c.to_line - 1, ch: c.to_ch || 0 };
+      const mark = editor.markText(from, to, { className: "synctex-flash" });
+      editor.setCursor(from);
+      editor.scrollIntoView(from, 80);
+      setTimeout(() => mark.clear(), 1100);
+    } else if (c.kind === "line" && typeof c.line === "number") {
+      const pos = { line: c.line - 1, ch: 0 };
+      editor.setCursor(pos);
+      editor.scrollIntoView(pos, 80);
+      const handle = editor.getLineHandle(c.line - 1);
+      if (handle) {
+        editor.addLineClass(handle, "background", "synctex-flash");
+        setTimeout(
+          () => editor.removeLineClass(handle, "background", "synctex-flash"),
+          1100,
+        );
+      }
+    }
+    editor.focus();
+  }
+
+  function commentAnchorPreview(c) {
+    if (c.orphaned) return "(orphaned)";
+    if (c.kind === "range") {
+      const s = c.excerpt || "";
+      return s.length > 70 ? s.slice(0, 67) + "…" : s;
+    }
+    if (c.kind === "line") {
+      const t = (c.line_text || "").trim();
+      const head = t.length > 70 ? t.slice(0, 67) + "…" : t;
+      return `line ${c.line}${head ? ` · ${head}` : ""}`;
+    }
+    return "(doc-level)";
+  }
+
+  async function resolveCommentRequest(id, resolved) {
+    try {
+      await fetch(`/api/comments/${encodeURIComponent(id)}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolved }),
+      });
+    } catch (e) {
+      console.warn("resolve comment failed", e);
+    }
+  }
+  async function deleteCommentRequest(id) {
+    try {
+      await fetch(`/api/comments/${encodeURIComponent(id)}`, { method: "DELETE" });
+    } catch (e) {
+      console.warn("delete comment failed", e);
+    }
+  }
+
+  async function postReply(parentId, message) {
+    if (!message.trim()) return;
+    try {
+      await fetch("/api/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: message.trim(),
+          parent_id: parentId,
+          author: "user",
+        }),
+      });
+    } catch (e) {
+      console.warn("reply failed", e);
+    }
+  }
+
+  function buildCommentRow(c, depth) {
+    const row = document.createElement("div");
+    row.className = "comment-row" + (c.resolved ? " resolved" : "") +
+      (c.orphaned ? " orphaned" : "") +
+      (depth > 0 ? " comment-reply" : "");
+    row.dataset.commentId = c.id;
+    if (depth > 0) row.style.marginLeft = depth * 14 + "px";
+
+    const head = document.createElement("div");
+    head.className = "comment-row-head";
+    if (depth === 0) {
+      const anchor = document.createElement("button");
+      anchor.className = "comment-anchor";
+      anchor.type = "button";
+      anchor.textContent = commentAnchorPreview(c);
+      anchor.addEventListener("click", () => flashCommentRange(c));
+      head.appendChild(anchor);
+    } else {
+      const tag = document.createElement("span");
+      tag.className = "comment-reply-tag";
+      tag.textContent = "↪ reply";
+      head.appendChild(tag);
+    }
+    const actions = document.createElement("div");
+    actions.className = "comment-actions";
+    if (depth === 0) {
+      const resolveBtn = document.createElement("button");
+      resolveBtn.className = "comment-action-btn";
+      resolveBtn.type = "button";
+      resolveBtn.textContent = c.resolved ? "Re-open" : "Resolve";
+      resolveBtn.addEventListener("click", () =>
+        resolveCommentRequest(c.id, !c.resolved),
+      );
+      actions.appendChild(resolveBtn);
+    }
+    // Surface "Ask Claude" on any user-authored comment when the direct-API
+    // path is enabled — it's the way to get a synchronous agent reply
+    // without going through your Claude Code chat.
+    if (apiResponseEnabled && c.author === "user") {
+      const askBtn = document.createElement("button");
+      askBtn.className = "comment-action-btn ask-claude";
+      askBtn.type = "button";
+      askBtn.textContent = "Ask Claude";
+      askBtn.addEventListener("click", () => requestApiResponse(c.id));
+      actions.appendChild(askBtn);
+    }
+    const replyBtn = document.createElement("button");
+    replyBtn.className = "comment-action-btn";
+    replyBtn.type = "button";
+    replyBtn.textContent = "Reply";
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "comment-action-btn delete";
+    deleteBtn.type = "button";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.addEventListener("click", () => deleteCommentRequest(c.id));
+    actions.appendChild(replyBtn);
+    actions.appendChild(deleteBtn);
+    head.appendChild(actions);
+    row.appendChild(head);
+
+    const msg = document.createElement("div");
+    msg.className = "comment-msg clamped";
+    msg.textContent = c.message;
+    row.appendChild(msg);
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "comment-show-more";
+    more.textContent = "Show more";
+    more.hidden = true;
+    more.addEventListener("click", () => {
+      const expanded = msg.classList.toggle("clamped") === false;
+      more.textContent = expanded ? "Show less" : "Show more";
+    });
+    row.appendChild(more);
+    requestAnimationFrame(() => {
+      if (msg.scrollHeight > msg.clientHeight + 1) more.hidden = false;
+    });
+    const meta = document.createElement("div");
+    meta.className = "comment-meta";
+    const tsStr = c.ts ? new Date(c.ts).toLocaleString() : "";
+    meta.textContent = [c.author || "agent", tsStr].filter(Boolean).join(" · ");
+    row.appendChild(meta);
+
+    // Reply input — hidden until the reply button is clicked.
+    const replyForm = document.createElement("form");
+    replyForm.className = "comment-reply-form";
+    replyForm.hidden = true;
+    const replyInput = document.createElement("textarea");
+    replyInput.className = "comment-reply-input";
+    replyInput.placeholder = "Write a reply…";
+    replyInput.rows = 2;
+    const replySubmit = document.createElement("button");
+    replySubmit.className = "comment-action-btn";
+    replySubmit.type = "submit";
+    replySubmit.textContent = "Post";
+    const replyCancel = document.createElement("button");
+    replyCancel.className = "comment-action-btn";
+    replyCancel.type = "button";
+    replyCancel.textContent = "Cancel";
+    replyCancel.addEventListener("click", () => {
+      replyForm.hidden = true;
+      replyInput.value = "";
+    });
+    const replyActions = document.createElement("div");
+    replyActions.className = "comment-reply-actions";
+    replyActions.appendChild(replySubmit);
+    replyActions.appendChild(replyCancel);
+    replyForm.appendChild(replyInput);
+    replyForm.appendChild(replyActions);
+    replyForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = replyInput.value;
+      replyInput.value = "";
+      replyForm.hidden = true;
+      postReply(c.id, text);
+    });
+    replyBtn.addEventListener("click", () => {
+      const showing = !replyForm.hidden;
+      replyForm.hidden = showing;
+      if (!showing) {
+        requestAnimationFrame(() => replyInput.focus());
+      }
+    });
+    row.appendChild(replyForm);
+    return row;
+  }
+
+  function renderCommentsPanel() {
+    const showResolved = commentsShowResolved.checked;
+    const docComments = allComments.filter((c) => c.doc === editorActiveDoc);
+    // Build a parent -> [replies] map. Top-level = comments without parent_id.
+    const byParent = new Map();
+    const tops = [];
+    for (const c of docComments) {
+      if (c.parent_id) {
+        if (!byParent.has(c.parent_id)) byParent.set(c.parent_id, []);
+        byParent.get(c.parent_id).push(c);
+      } else {
+        tops.push(c);
+      }
+    }
+    // Sort top-level by resolved-then-line.
+    tops.sort((a, b) => {
+      const ar = a.resolved ? 1 : 0;
+      const br = b.resolved ? 1 : 0;
+      if (ar !== br) return ar - br;
+      const al = a.kind === "range" ? a.from_line : (a.kind === "line" ? a.line : 0);
+      const bl = b.kind === "range" ? b.from_line : (b.kind === "line" ? b.line : 0);
+      return al - bl;
+    });
+    // Sort replies within each thread by timestamp ascending.
+    for (const replies of byParent.values()) {
+      replies.sort((a, b) => Date.parse(a.ts || "") - Date.parse(b.ts || ""));
+    }
+    commentsListEl.replaceChildren();
+    let rendered = 0;
+    function emit(c, depth) {
+      if (!showResolved && c.resolved && depth === 0) return;
+      commentsListEl.appendChild(buildCommentRow(c, depth));
+      rendered++;
+      const kids = byParent.get(c.id) || [];
+      for (const k of kids) emit(k, depth + 1);
+    }
+    for (const t of tops) emit(t, 0);
+    commentsEmptyEl.hidden = rendered > 0;
+  }
+
+  function updateCommentsBadge() {
+    const n = allComments.filter(
+      (c) => c.doc === editorActiveDoc && !c.resolved,
+    ).length;
+    if (n > 0) {
+      commentsBadge.textContent = String(n);
+      commentsBadge.hidden = false;
+    } else {
+      commentsBadge.hidden = true;
+    }
+  }
+
+  function applyComments(comments) {
+    allComments = Array.isArray(comments) ? comments : [];
+    applyCommentMarkers();
+    renderCommentsPanel();
+    updateCommentsBadge();
+  }
+
+  // ---------- direct-API response (uses ANTHROPIC_API_KEY on the server) ----------
+  let apiResponseEnabled = false;
+  fetch("/api/config")
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((cfg) => {
+      apiResponseEnabled = !!cfg.api_response_enabled;
+    })
+    .catch(() => {});
+
+  async function requestApiResponse(commentId) {
+    try {
+      const r = await fetch(
+        `/api/comments/${encodeURIComponent(commentId)}/respond`,
+        { method: "POST" },
+      );
+      if (!r.ok) {
+        const err = await r.text();
+        if (r.status === 503) {
+          alert("ANTHROPIC_API_KEY isn't set on the server. Either configure it and restart, or ask Claude Code to respond to the pending comment manually.");
+        } else {
+          alert(`API reply failed (${r.status}): ${err.slice(0, 200)}`);
+        }
+      }
+    } catch (e) {
+      alert(`API reply failed: ${e}`);
+    }
+  }
+
+  // ---------- Cmd+K inline prompt ----------
+  // Highlight text in the editor, hit Cmd+K (or Ctrl+K) to drop a user
+  // comment anchored to the selection. The popup floats over the editor
+  // near the selection. Comment is created with author=user.
+  let cmdkPromptEl = null;
+  function closeCmdkPrompt() {
+    if (cmdkPromptEl) {
+      cmdkPromptEl.remove();
+      cmdkPromptEl = null;
+    }
+  }
+  async function postUserComment(excerpt, message) {
+    if (!message.trim()) return null;
+    try {
+      const r = await fetch("/api/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          excerpt,
+          message: message.trim(),
+          author: "user",
+        }),
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        alert(`Comment failed: ${err.slice(0, 200)}`);
+        return null;
+      }
+      const data = await r.json();
+      return data?.comment?.id || null;
+    } catch (e) {
+      console.warn("user comment failed", e);
+      return null;
+    }
+  }
+
+  function openCmdkPrompt() {
+    if (cmdkPromptEl) return;
+    const sel = editor.getSelection();
+    if (!sel || !sel.trim()) return;
+    // Position the popup near the cursor head.
+    const headPos = editor.getCursor("head");
+    const coords = editor.charCoords(headPos, "window");
+    const box = document.createElement("div");
+    box.className = "cmdk-prompt";
+    const snippet = document.createElement("div");
+    snippet.className = "cmdk-prompt-snippet";
+    snippet.textContent = sel.length > 240 ? sel.slice(0, 237) + "…" : sel;
+    box.appendChild(snippet);
+    const input = document.createElement("textarea");
+    input.className = "cmdk-prompt-input";
+    input.placeholder = "Ask, suggest, or note — leaves a comment anchored to the selection.";
+    box.appendChild(input);
+    const actions = document.createElement("div");
+    actions.className = "cmdk-prompt-actions";
+    const hint = document.createElement("span");
+    hint.className = "cmdk-prompt-hint";
+    hint.textContent = "↩ to send · esc to cancel";
+    actions.appendChild(hint);
+    const right = document.createElement("div");
+    right.style.display = "flex";
+    right.style.gap = "6px";
+    const cancel = document.createElement("button");
+    cancel.className = "comment-action-btn";
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => closeCmdkPrompt());
+    const send = document.createElement("button");
+    send.className = "comment-action-btn";
+    send.type = "button";
+    send.textContent = "Comment";
+    send.addEventListener("click", () => {
+      const message = input.value;
+      closeCmdkPrompt();
+      postUserComment(sel, message);
+    });
+    right.appendChild(cancel);
+    right.appendChild(send);
+    if (apiResponseEnabled) {
+      const sendAndAsk = document.createElement("button");
+      sendAndAsk.className = "comment-action-btn cmdk-ask";
+      sendAndAsk.type = "button";
+      sendAndAsk.textContent = "Comment + ask Claude";
+      sendAndAsk.addEventListener("click", async () => {
+        const message = input.value;
+        closeCmdkPrompt();
+        const id = await postUserComment(sel, message);
+        if (id) await requestApiResponse(id);
+      });
+      right.appendChild(sendAndAsk);
+    }
+    actions.appendChild(right);
+    box.appendChild(actions);
+    document.body.appendChild(box);
+    cmdkPromptEl = box;
+    // Place below the cursor; if it'd overflow, place above.
+    const top = coords.bottom + 6;
+    const left = Math.min(coords.left, window.innerWidth - 380);
+    box.style.left = Math.max(8, left) + "px";
+    box.style.top = top + "px";
+    input.addEventListener("keydown", async (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeCmdkPrompt();
+      } else if (e.key === "Enter" && !e.shiftKey) {
+        // Plain Enter posts the comment.
+        // Cmd/Ctrl+Enter additionally asks Claude (if API enabled).
+        e.preventDefault();
+        const message = input.value;
+        const wantApi = (e.metaKey || e.ctrlKey) && apiResponseEnabled;
+        closeCmdkPrompt();
+        const id = await postUserComment(sel, message);
+        if (wantApi && id) await requestApiResponse(id);
+      }
+    });
+    requestAnimationFrame(() => input.focus());
+  }
+
+  editor.setOption("extraKeys", {
+    ...(editor.getOption("extraKeys") || {}),
+    "Cmd-K": () => openCmdkPrompt(),
+    "Ctrl-K": () => openCmdkPrompt(),
+  });
+
+  commentsBtn.addEventListener("click", () => {
+    commentsPanel.hidden = !commentsPanel.hidden;
+    if (!commentsPanel.hidden) renderCommentsPanel();
+  });
+  commentsCloseBtn.addEventListener("click", () => {
+    commentsPanel.hidden = true;
+  });
+  commentsShowResolved.addEventListener("change", renderCommentsPanel);
+
+  // ---------- agent edit highlights ----------
+  // After each agent edit, tint the touched span so the user can scan
+  // "where did Claude just write?". Cap at the last N and time them out so
+  // the highlights don't accumulate into noise.
+  const AGENT_EDIT_LIMIT = 5;
+  const AGENT_EDIT_TTL_MS = 15000;
+  const agentEdits = [];
+
+  function clearAgentEdit(entry) {
+    const i = agentEdits.indexOf(entry);
+    if (i >= 0) agentEdits.splice(i, 1);
+    if (entry.mark) entry.mark.clear();
+    if (entry.timer) clearTimeout(entry.timer);
+  }
+  function markAgentEdit(fromIdx, toIdx) {
+    if (typeof fromIdx !== "number" || typeof toIdx !== "number") return;
+    if (toIdx <= fromIdx) return;
+    const a = editor.posFromIndex(fromIdx);
+    const b = editor.posFromIndex(toIdx);
+    const mark = editor.markText(a, b, {
+      className: "cm-agent-edit",
+      inclusiveLeft: false,
+      inclusiveRight: false,
+    });
+    const entry = { mark, timer: null };
+    agentEdits.push(entry);
+    while (agentEdits.length > AGENT_EDIT_LIMIT) clearAgentEdit(agentEdits[0]);
+    entry.timer = setTimeout(() => clearAgentEdit(entry), AGENT_EDIT_TTL_MS);
+  }
+
+  // ---------- line marks (unified errors + comments gutter) ----------
+  // One gutter column, one marker per annotated line. The marker's visual
+  // is determined by the COMBINED set of errors + open comments on that
+  // line: single filled dot for one annotation (red for error, yellow for
+  // comment), two overlapping filled dots for two (each in its own color),
+  // hollow ring for three or more (red if any error involved, else yellow).
+  let currentErrorsData = [];
   let currentErrorLines = [];
-  function clearErrorMarkers() {
+  let linePopupHideTimer = null;
+
+  function hideLinePopup() {
+    linePopupEl.hidden = true;
+  }
+
+  function showLinePopup(target, info) {
+    clearTimeout(linePopupHideTimer);
+    linePopupEl.replaceChildren();
+    for (const err of info.errors) {
+      const block = document.createElement("div");
+      block.className = "line-popup-block line-popup-error";
+      const msg = document.createElement("div");
+      msg.className = "error-popup-msg";
+      msg.textContent = err.message || "LaTeX error";
+      block.appendChild(msg);
+      if (err.snippet) {
+        const code = document.createElement("pre");
+        code.className = "error-popup-snippet";
+        code.textContent = err.snippet;
+        block.appendChild(code);
+      }
+      linePopupEl.appendChild(block);
+    }
+    for (const c of info.comments) {
+      const block = document.createElement("div");
+      block.className = "line-popup-block line-popup-comment";
+      const msg = document.createElement("div");
+      msg.className = "comment-popup-msg clamped";
+      msg.textContent = c.message;
+      block.appendChild(msg);
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "comment-popup-more";
+      more.textContent = "Show more in sidebar →";
+      more.hidden = true;
+      more.addEventListener("click", (e) => {
+        e.stopPropagation();
+        hideLinePopup();
+        openCommentInSidebar(c.id);
+      });
+      block.appendChild(more);
+      if (c.author) {
+        const meta = document.createElement("div");
+        meta.className = "comment-popup-meta";
+        meta.textContent = `— ${c.author}`;
+        block.appendChild(meta);
+      }
+      linePopupEl.appendChild(block);
+      requestAnimationFrame(() => {
+        if (msg.scrollHeight > msg.clientHeight + 1) more.hidden = false;
+      });
+    }
+    linePopupEl.hidden = false;
+    const rect = target.getBoundingClientRect();
+    linePopupEl.style.left = rect.right + 8 + "px";
+    linePopupEl.style.top = rect.top + "px";
+  }
+
+  linePopupEl.addEventListener("mouseenter", () => {
+    clearTimeout(linePopupHideTimer);
+  });
+  linePopupEl.addEventListener("mouseleave", () => {
+    linePopupHideTimer = setTimeout(hideLinePopup, 120);
+  });
+
+  // Compose a per-line marker from the (errors, comments) tuple. See the
+  // section header above for the shape rules.
+  function appendSolo(root, classes) {
+    const dot = document.createElement("span");
+    dot.className = "mark-dot " + classes;
+    root.appendChild(dot);
+  }
+  function appendPair(root, leftClasses, rightClasses) {
+    const left = document.createElement("span");
+    left.className = "mark-dot pos-left " + leftClasses;
+    const right = document.createElement("span");
+    right.className = "mark-dot pos-right " + rightClasses;
+    root.appendChild(left);
+    root.appendChild(right);
+  }
+  function appendOnePositioned(root, typeClass, posClass) {
+    const dot = document.createElement("span");
+    dot.className = "mark-dot " + posClass + " " + typeClass;
+    root.appendChild(dot);
+  }
+  function shapeFor(n) {
+    // When both types are present, each type's circle is either a filled
+    // dot (count=1) or a hollow ring (count>=2). The standalone "two
+    // overlapping filled" representation is reserved for the single-type
+    // case so it doesn't fight for room with the other type's circle.
+    return n === 1 ? "" : "ring ";
+  }
+
+  function makeLineMarker(info) {
+    const root = document.createElement("div");
+    root.className = "agentex-mark";
+    const e = info.errors.length;
+    const c = info.comments.length;
+
+    if (e === 0) {
+      if (c === 1) appendSolo(root, "is-comment");
+      else if (c === 2) appendPair(root, "is-comment", "is-comment");
+      else appendSolo(root, "ring is-comment");
+    } else if (c === 0) {
+      if (e === 1) appendSolo(root, "is-error");
+      else if (e === 2) appendPair(root, "is-error", "is-error");
+      else appendSolo(root, "ring is-error");
+    } else if (e === 1 && c === 1) {
+      // Visually identical to the 2c case (same geometry, same z-stacking
+      // structure): pos-left appended first, pos-right appended second so
+      // the right circle paints on top. The only thing that differs from
+      // 2c is the color of the LEFT circle (red vs yellow).
+      appendOnePositioned(root, "is-error", "pos-left");
+      appendOnePositioned(root, "is-comment", "pos-right");
+    } else if (e === 1 && c >= 2) {
+      // Multiple yellows + one red would crowd the gutter. Collapse to a
+      // single circle: red fill, yellow border. Covers BOTH the 1e+2c
+      // and 1e+3+c cases.
+      appendSolo(root, "combined fill-is-error border-is-comment");
+    } else if (e >= 2 && c === 1) {
+      // Mirror collapse: yellow fill, red border.
+      appendSolo(root, "combined fill-is-comment border-is-error");
+    } else {
+      appendPair(
+        root,
+        shapeFor(e) + "is-error",
+        shapeFor(c) + "is-comment",
+      );
+    }
+    root.addEventListener("mouseenter", () => showLinePopup(root, info));
+    root.addEventListener("mouseleave", () => {
+      linePopupHideTimer = setTimeout(hideLinePopup, 120);
+    });
+    root.addEventListener("click", () => {
+      hideLinePopup();
+      if (info.comments.length) {
+        openCommentInSidebar(info.comments[0].id);
+      }
+    });
+    return root;
+  }
+
+  function clearErrorTints() {
     for (const line of currentErrorLines) {
       const handle = editor.getLineHandle(line - 1);
-      if (!handle) continue;
-      editor.removeLineClass(handle, "background", "cm-error-bg");
+      if (handle) editor.removeLineClass(handle, "background", "cm-error-bg");
     }
     currentErrorLines = [];
   }
-  function applyErrorMarkers(errors) {
-    clearErrorMarkers();
-    if (!errors || !errors.length) return;
-    for (const err of errors) {
-      const line = err.line;
+
+  function applyLineMarks() {
+    editor.clearGutter("agentex-marks");
+    clearErrorTints();
+    if (!editorActiveDoc && !currentErrorsData.length) return;
+    const byLine = new Map();
+    for (const e of currentErrorsData) {
+      if (typeof e.line !== "number") continue;
+      if (!byLine.has(e.line)) byLine.set(e.line, { errors: [], comments: [] });
+      byLine.get(e.line).errors.push(e);
+    }
+    for (const c of allComments) {
+      if (c.doc !== editorActiveDoc) continue;
+      if (c.resolved) continue;
+      if (c.kind === "doc") continue;
+      if (c.kind === "reply") continue; // replies live nested under parents
+      const line = c.kind === "range" ? c.from_line : c.line;
       if (typeof line !== "number") continue;
+      if (!byLine.has(line)) byLine.set(line, { errors: [], comments: [] });
+      byLine.get(line).comments.push(c);
+    }
+    for (const [line, info] of byLine) {
       const handle = editor.getLineHandle(line - 1);
       if (!handle) continue;
-      editor.addLineClass(handle, "background", "cm-error-bg");
-      currentErrorLines.push(line);
+      if (info.errors.length) {
+        editor.addLineClass(handle, "background", "cm-error-bg");
+        currentErrorLines.push(line);
+      }
+      editor.setGutterMarker(line - 1, "agentex-marks", makeLineMarker(info));
     }
+  }
+
+  function applyErrorMarkers(errors) {
+    currentErrorsData = Array.isArray(errors) ? errors : [];
+    applyLineMarks();
+  }
+  function clearErrorMarkers() {
+    currentErrorsData = [];
+    applyLineMarks();
+    hideLinePopup();
   }
 
   // ---------- SyncTeX bidirectional navigation ----------
