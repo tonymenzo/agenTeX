@@ -37,6 +37,7 @@
   let renderTargetName = "";
   let allDocs = [];
   let allDirs = [];
+  let allAssets = [];
   let expandedFolders = new Set(lsGet("expandedFolders", []));
 
   function saveExpanded() {
@@ -1538,7 +1539,7 @@
     );
   }
 
-  function buildTree(files, dirs) {
+  function buildTree(files, dirs, assets = []) {
     const root = { type: "dir", path: "", name: "", children: [] };
     const byPath = new Map([["", root]]);
     // Insert all dirs first, shallow → deep, so parents exist when we attach
@@ -1555,18 +1556,23 @@
       byPath.set(d, node);
       parent.children.push(node);
     }
-    for (const f of files) {
-      const parts = f.split("/");
+    const place = (path, type) => {
+      const parts = path.split("/");
       const name = parts.pop();
       const parentPath = parts.join("/");
       const parent = byPath.get(parentPath) || root;
-      parent.children.push({ type: "file", path: f, name });
-    }
-    // Folders before files, alphabetical within each.
+      parent.children.push({ type, path, name });
+    };
+    for (const f of files) place(f, "file");
+    for (const a of assets) place(a, "asset");
+    // Folders first; within children, editables before assets; alphabetical
+    // within each rank.
+    const rank = (t) => (t === "dir" ? 0 : t === "file" ? 1 : 2);
     (function sortRec(node) {
       if (node.type !== "dir") return;
       node.children.sort((a, b) => {
-        if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+        const ra = rank(a.type), rb = rank(b.type);
+        if (ra !== rb) return ra - rb;
         return a.name.localeCompare(b.name);
       });
       node.children.forEach(sortRec);
@@ -1611,6 +1617,20 @@
     return li;
   }
 
+  function renderAssetNode(node) {
+    // Non-editable: shown grayed-out so the user sees their figs/ tree
+    // alongside .tex files but can't accidentally try to open a binary.
+    // No click handler, no drag — purely informational.
+    const li = document.createElement("li");
+    li.className = "tree-file tree-asset";
+    li.dataset.path = node.path;
+    const row = makeRow({ arrow: "", label: node.name, fullPath: node.path });
+    row.classList.add("asset");
+    row.title = `${node.path} — binary asset, not editable`;
+    li.appendChild(row);
+    return li;
+  }
+
   function renderFolderNode(node) {
     const li = document.createElement("li");
     li.className = "tree-folder";
@@ -1632,7 +1652,11 @@
     li.appendChild(row);
     const ul = document.createElement("ul");
     for (const child of node.children) {
-      ul.appendChild(child.type === "dir" ? renderFolderNode(child) : renderFileNode(child));
+      ul.appendChild(
+        child.type === "dir" ? renderFolderNode(child)
+          : child.type === "asset" ? renderAssetNode(child)
+          : renderFileNode(child),
+      );
     }
     li.appendChild(ul);
     makeFolderDropTarget(li, row, node.path);
@@ -1640,10 +1664,12 @@
   }
 
   function renderFileList() {
-    const tree = buildTree(allDocs, allDirs);
+    const tree = buildTree(allDocs, allDirs, allAssets);
     fileListEl.replaceChildren(
       ...tree.children.map((c) =>
-        c.type === "dir" ? renderFolderNode(c) : renderFileNode(c)
+        c.type === "dir" ? renderFolderNode(c)
+          : c.type === "asset" ? renderAssetNode(c)
+          : renderFileNode(c)
       )
     );
   }
@@ -1670,6 +1696,7 @@
   function applyDocList(msg) {
     allDocs = msg.names || [];
     allDirs = msg.dirs || [];
+    allAssets = msg.assets || [];
     const newActive = msg.active || activeName;
     if (newActive && newActive !== activeName) {
       ensureAncestorsExpanded(newActive);
@@ -1747,6 +1774,32 @@
         markAgentEdit(msg.from_index, msg.to_index);
       } else if (msg.type === "comments") {
         applyComments(msg.comments || []);
+      } else if (msg.type === "agent_stream_chunk") {
+        appendAgentStreamChunk(msg.comment_id, msg.text);
+      } else if (msg.type === "agent_tool_call_start") {
+        upsertToolCallPill(msg.comment_id, {
+          call_id: msg.call_id,
+          name: msg.tool_name,
+          args: msg.args,
+          state: "running",
+        });
+      } else if (msg.type === "agent_tool_call_end") {
+        upsertToolCallPill(msg.comment_id, {
+          call_id: msg.call_id,
+          name: msg.tool_name,
+          result: msg.result,
+          failed: !!msg.failed,
+          runtime_ms: msg.runtime_ms,
+          state: msg.failed ? "failed" : "done",
+        });
+      } else if (msg.type === "agent_stream_end") {
+        // Final comments broadcast immediately follows with the canonical
+        // content; release the streaming buffer once it has.
+        streamingText.delete(msg.comment_id);
+        const row = commentsListEl.querySelector(
+          `.comment-row[data-comment-id="${CSS.escape(msg.comment_id)}"]`,
+        );
+        if (row) row.classList.remove("comment-streaming");
       } else if (msg.type === "save_now") {
         // Server is about to do an agent-facing read; flush our debounce
         // timer immediately so any in-flight keystrokes hit disk first.
@@ -1800,6 +1853,51 @@
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
     editor.refresh();
+  });
+
+  // Comments panel resize handle: drag the left edge to widen/narrow the
+  // panel. Mirrors the editor/preview divider — minimum width keeps the
+  // panel readable; maximum caps at ~70% of viewport so the editor doesn't
+  // collapse to nothing.
+  const COMMENTS_MIN = 240;
+  const COMMENTS_MAX_RATIO = 0.7;
+  const COMMENTS_WIDTH_KEY = "commentsWidth";
+  const savedCommentsWidth = lsGet(COMMENTS_WIDTH_KEY, null);
+  if (typeof savedCommentsWidth === "number" && savedCommentsWidth > 0) {
+    commentsPanel.style.width = savedCommentsWidth + "px";
+  }
+  const commentsResize = $("comments-resize-handle");
+  let commentsDragging = false;
+  let commentsDragRaf = 0;
+  commentsResize.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    commentsDragging = true;
+    commentsResize.classList.add("dragging");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!commentsDragging) return;
+    const vw = window.innerWidth;
+    const maxW = Math.max(COMMENTS_MIN, vw * COMMENTS_MAX_RATIO);
+    const newWidth = Math.max(COMMENTS_MIN, Math.min(maxW, vw - e.clientX));
+    commentsPanel.style.width = newWidth + "px";
+    if (!commentsDragRaf) {
+      commentsDragRaf = requestAnimationFrame(() => {
+        commentsDragRaf = 0;
+        editor.refresh();
+      });
+    }
+  });
+  window.addEventListener("mouseup", () => {
+    if (!commentsDragging) return;
+    commentsDragging = false;
+    commentsResize.classList.remove("dragging");
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    editor.refresh();
+    const px = parseInt(commentsPanel.style.width, 10);
+    if (px > 0) lsSet(COMMENTS_WIDTH_KEY, px);
   });
 
   let zoomTimer = null;
@@ -1884,20 +1982,32 @@
   // editor gutter (a yellow dot on the line) and the right-side sidebar.
   let allComments = [];
 
+  // Threads collapsed by the user. Keyed by the root comment id. Lives in
+  // memory only — collapse state is a viewing preference, not persistent
+  // data, and comment ids don't survive across sessions anyway.
+  const collapsedThreads = new Set();
+
+  function rootCommentIdFor(id) {
+    let cur = allComments.find((c) => c.id === id);
+    while (cur && cur.parent_id) {
+      const next = allComments.find((c) => c.id === cur.parent_id);
+      if (!next || next === cur) break;
+      cur = next;
+    }
+    return cur ? cur.id : id;
+  }
+
   function openCommentInSidebar(id) {
     commentsPanel.hidden = false;
+    // If the target lives inside a collapsed thread, expand it so the row
+    // becomes visible and scrollable.
+    collapsedThreads.delete(rootCommentIdFor(id));
     renderCommentsPanel();
     requestAnimationFrame(() => {
       const row = commentsListEl.querySelector(
         `.comment-row[data-comment-id="${CSS.escape(id)}"]`,
       );
       if (!row) return;
-      const msg = row.querySelector(".comment-msg");
-      const more = row.querySelector(".comment-show-more");
-      if (msg && msg.classList.contains("clamped")) {
-        msg.classList.remove("clamped");
-        if (more) more.textContent = "Show less";
-      }
       row.scrollIntoView({ block: "center", behavior: "smooth" });
       row.classList.add("comment-row-flash");
       setTimeout(() => row.classList.remove("comment-row-flash"), 900);
@@ -1969,10 +2079,130 @@
     }
   }
 
+  // In-progress streaming buffer per comment id. If something triggers
+  // renderCommentsPanel mid-stream (another comment lands, etc.) we want
+  // the streaming row to keep the text it's accumulated so far rather
+  // than re-render with the empty placeholder body from `allComments`.
+  const streamingText = new Map();
+
+  // ---------- agent tool-call pills ----------
+  // Each agent reply can carry a list of tool calls (ListDocs, ReadDoc, …)
+  // the model made while composing its answer. We render them as pills
+  // below the message body; click toggles the args/result detail.
+  function _truncate(s, n) {
+    if (typeof s !== "string") return "";
+    return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  }
+  function _summarizeArgs(args) {
+    if (!args || typeof args !== "object") return "";
+    const parts = [];
+    for (const [k, v] of Object.entries(args)) {
+      const sv = typeof v === "string" ? v : JSON.stringify(v);
+      parts.push(`${k}=${_truncate(String(sv), 30)}`);
+    }
+    return parts.join(", ");
+  }
+  function upsertToolCallPill(commentId, info, rowOverride) {
+    if (!commentId || !info.call_id) return;
+    // During buildCommentRow's events replay the row hasn't been
+    // appended to commentsListEl yet, so we can't find it via querySelector.
+    // The caller passes the row reference directly in that case.
+    const row = rowOverride || commentsListEl.querySelector(
+      `.comment-row[data-comment-id="${CSS.escape(commentId)}"]`,
+    );
+    if (!row) return;
+    const flow = row.querySelector(".comment-msg-flow");
+    if (!flow) return;
+    let pill = flow.querySelector(
+      `.tool-pill[data-call-id="${CSS.escape(info.call_id)}"]`,
+    );
+    if (!pill) {
+      pill = document.createElement("div");
+      pill.className = "tool-pill";
+      pill.dataset.callId = info.call_id;
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "tool-pill-head";
+      head.addEventListener("click", () => pill.classList.toggle("expanded"));
+      const body = document.createElement("div");
+      body.className = "tool-pill-body";
+      pill.appendChild(head);
+      pill.appendChild(body);
+      flow.appendChild(pill);
+    }
+    pill.classList.remove("running", "done", "failed");
+    pill.classList.add(info.state);
+    const head = pill.querySelector(".tool-pill-head");
+    const argSummary = _summarizeArgs(info.args);
+    const rtTag =
+      info.runtime_ms != null
+        ? `${info.runtime_ms < 10 ? info.runtime_ms.toFixed(1) : info.runtime_ms.toFixed(0)}ms`
+        : "…";
+    head.innerHTML = "";
+    const stateDot = document.createElement("span");
+    stateDot.className = "tool-pill-state";
+    head.appendChild(stateDot);
+    const nameEl = document.createElement("span");
+    nameEl.className = "tool-pill-name";
+    nameEl.textContent = info.name || "tool";
+    head.appendChild(nameEl);
+    if (argSummary) {
+      const argsEl = document.createElement("span");
+      argsEl.className = "tool-pill-args";
+      argsEl.textContent = `(${argSummary})`;
+      head.appendChild(argsEl);
+    }
+    const rtEl = document.createElement("span");
+    rtEl.className = "tool-pill-rt";
+    rtEl.textContent = rtTag;
+    head.appendChild(rtEl);
+
+    const body = pill.querySelector(".tool-pill-body");
+    body.replaceChildren();
+    if (info.args && Object.keys(info.args).length) {
+      const argsBlock = document.createElement("pre");
+      argsBlock.className = "tool-pill-detail";
+      argsBlock.textContent = JSON.stringify(info.args, null, 2);
+      body.appendChild(argsBlock);
+    }
+    if (info.result) {
+      const sep = document.createElement("div");
+      sep.className = "tool-pill-sep";
+      sep.textContent = "→";
+      body.appendChild(sep);
+      const resultBlock = document.createElement("pre");
+      resultBlock.className = "tool-pill-detail";
+      resultBlock.textContent = info.result;
+      body.appendChild(resultBlock);
+    }
+  }
+
+  function appendAgentStreamChunk(commentId, text) {
+    if (!commentId || !text) return;
+    streamingText.set(commentId, (streamingText.get(commentId) || "") + text);
+    const row = commentsListEl.querySelector(
+      `.comment-row[data-comment-id="${CSS.escape(commentId)}"]`,
+    );
+    if (!row) return;
+    const flow = row.querySelector(".comment-msg-flow");
+    if (!flow) return;
+    // Append text to the LAST text segment in the flow. If the most
+    // recent block is a pill (i.e. a tool just ran), start a new text
+    // segment so the order reads "text → tool → text".
+    let last = flow.lastElementChild;
+    if (!last || !last.classList.contains("comment-text-segment")) {
+      last = document.createElement("div");
+      last.className = "comment-text-segment";
+      flow.appendChild(last);
+    }
+    last.textContent = (last.textContent || "") + text;
+    row.classList.add("comment-streaming");
+  }
+
   async function postReply(parentId, message) {
-    if (!message.trim()) return;
+    if (!message.trim()) return null;
     try {
-      await fetch("/api/comments", {
+      const r = await fetch("/api/comments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1981,34 +2211,102 @@
           author: "user",
         }),
       });
+      if (!r.ok) return null;
+      const data = await r.json();
+      return data?.comment?.id || null;
     } catch (e) {
       console.warn("reply failed", e);
+      return null;
     }
   }
 
-  function buildCommentRow(c, depth) {
+  function formatCommentTime(ts) {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    const now = Date.now();
+    const diffSec = (now - d.getTime()) / 1000;
+    if (diffSec < 45) return "now";
+    if (diffSec < 3600) return Math.floor(diffSec / 60) + "m";
+    if (diffSec < 86400) return Math.floor(diffSec / 3600) + "h";
+    if (diffSec < 7 * 86400) return Math.floor(diffSec / 86400) + "d";
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  function buildAgentTogglePill(rootId) {
+    const toggle = document.createElement("button");
+    toggle.className = "thread-agent-toggle";
+    toggle.type = "button";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = "agent";
+    toggle.appendChild(dot);
+    toggle.appendChild(label);
+    const refresh = () => {
+      const on = isAgentEnabledForThread(rootId);
+      toggle.dataset.state = on ? "on" : "off";
+      toggle.title = on
+        ? "Agent on for this thread — Enter posts and asks. Click to disable."
+        : "Agent off for this thread — Enter posts a note. Click to enable.";
+    };
+    refresh();
+    toggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const on = isAgentEnabledForThread(rootId);
+      setAgentEnabledForThread(rootId, !on);
+      // Re-render so the reply form's submit button picks up the new
+      // label + gold styling for the new state.
+      renderCommentsPanel();
+    });
+    toggle.addEventListener("dblclick", (e) => e.stopPropagation());
+    return toggle;
+  }
+
+  function buildCommentRow(c, depth, autoOpenReply = false, rootId = null) {
+    // Reply / Post behavior is governed by the THREAD's agent toggle, not
+    // the row's. For top-level comments rootId === c.id.
+    const threadRootId = rootId || c.id;
+    const threadAgentOn = isAgentEnabledForThread(threadRootId);
     const row = document.createElement("div");
     row.className = "comment-row" + (c.resolved ? " resolved" : "") +
       (c.orphaned ? " orphaned" : "") +
+      (c.failed ? " comment-failed" : "") +
       (depth > 0 ? " comment-reply" : "");
     row.dataset.commentId = c.id;
-    if (depth > 0) row.style.marginLeft = depth * 14 + "px";
 
+    // Top meta line: author chip, optional model, relative timestamp, then
+    // hover-revealed action buttons on the right. The anchor preview lives
+    // in the thread header — no need to repeat it here.
     const head = document.createElement("div");
     head.className = "comment-row-head";
-    if (depth === 0) {
-      const anchor = document.createElement("button");
-      anchor.className = "comment-anchor";
-      anchor.type = "button";
-      anchor.textContent = commentAnchorPreview(c);
-      anchor.addEventListener("click", () => flashCommentRange(c));
-      head.appendChild(anchor);
-    } else {
-      const tag = document.createElement("span");
-      tag.className = "comment-reply-tag";
-      tag.textContent = "↪ reply";
-      head.appendChild(tag);
+
+    const authorTag = document.createElement("span");
+    authorTag.className = "comment-author" +
+      (c.author === "agent" ? " is-agent" : " is-user");
+    authorTag.textContent = c.author || "user";
+    head.appendChild(authorTag);
+
+    if (c.author === "agent" && c.model) {
+      const modelTag = document.createElement("span");
+      modelTag.className = "comment-model";
+      modelTag.textContent = c.provider ? `${c.provider}/${c.model}` : c.model;
+      head.appendChild(modelTag);
     }
+
+    if (c.ts) {
+      const tsTag = document.createElement("span");
+      tsTag.className = "comment-ts";
+      tsTag.textContent = formatCommentTime(c.ts);
+      tsTag.title = new Date(c.ts).toLocaleString();
+      head.appendChild(tsTag);
+    }
+
+    const spacer = document.createElement("span");
+    spacer.className = "comment-head-spacer";
+    head.appendChild(spacer);
+
     const actions = document.createElement("div");
     actions.className = "comment-actions";
     if (depth === 0) {
@@ -2020,17 +2318,6 @@
         resolveCommentRequest(c.id, !c.resolved),
       );
       actions.appendChild(resolveBtn);
-    }
-    // Surface "Ask Claude" on any user-authored comment when the direct-API
-    // path is enabled — it's the way to get a synchronous agent reply
-    // without going through your Claude Code chat.
-    if (apiResponseEnabled && c.author === "user") {
-      const askBtn = document.createElement("button");
-      askBtn.className = "comment-action-btn ask-claude";
-      askBtn.type = "button";
-      askBtn.textContent = "Ask Claude";
-      askBtn.addEventListener("click", () => requestApiResponse(c.id));
-      actions.appendChild(askBtn);
     }
     const replyBtn = document.createElement("button");
     replyBtn.className = "comment-action-btn";
@@ -2046,41 +2333,67 @@
     head.appendChild(actions);
     row.appendChild(head);
 
-    const msg = document.createElement("div");
-    msg.className = "comment-msg clamped";
-    msg.textContent = c.message;
-    row.appendChild(msg);
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "comment-show-more";
-    more.textContent = "Show more";
-    more.hidden = true;
-    more.addEventListener("click", () => {
-      const expanded = msg.classList.toggle("clamped") === false;
-      more.textContent = expanded ? "Show less" : "Show more";
-    });
-    row.appendChild(more);
-    requestAnimationFrame(() => {
-      if (msg.scrollHeight > msg.clientHeight + 1) more.hidden = false;
-    });
-    const meta = document.createElement("div");
-    meta.className = "comment-meta";
-    const tsStr = c.ts ? new Date(c.ts).toLocaleString() : "";
-    meta.textContent = [c.author || "agent", tsStr].filter(Boolean).join(" · ");
-    row.appendChild(meta);
+    // Chronological flow: text segments and tool pills appear in the
+    // order the agent produced them. Replaces the old "one text block +
+    // pills below" layout.
+    const flow = document.createElement("div");
+    flow.className = "comment-msg-flow";
+    row.appendChild(flow);
+    const events = Array.isArray(c.events) ? c.events : null;
+    if (events && events.length) {
+      for (const ev of events) {
+        if (ev.type === "text" && ev.text) {
+          const seg = document.createElement("div");
+          seg.className = "comment-text-segment";
+          seg.textContent = ev.text;
+          flow.appendChild(seg);
+        } else if (ev.type === "tool_call") {
+          upsertToolCallPill(c.id, {
+            call_id: ev.id,
+            name: ev.name,
+            args: ev.args,
+            result: ev.result,
+            failed: !!ev.failed,
+            runtime_ms: ev.runtime_ms,
+            state: ev.failed ? "failed" : "done",
+          }, row);
+        }
+      }
+    } else if (c.message) {
+      // Backward-compat for comments without an events log (older agent
+      // replies, or user-authored comments which never have events).
+      const seg = document.createElement("div");
+      seg.className = "comment-text-segment";
+      seg.textContent = c.message;
+      flow.appendChild(seg);
+    }
+    if (c.streaming || streamingText.has(c.id)) {
+      row.classList.add("comment-streaming");
+    }
+    // Author / model / timestamp now live in the top meta line; tool
+    // calls replay is handled inline above via the `events` log, which
+    // preserves their position relative to text segments.
 
-    // Reply input — hidden until the reply button is clicked.
+    // Reply input — hidden until the reply button is clicked, OR
+    // auto-opened when this row is the latest in its thread so the user
+    // can just start typing the next message.
     const replyForm = document.createElement("form");
     replyForm.className = "comment-reply-form";
-    replyForm.hidden = true;
+    replyForm.hidden = !autoOpenReply;
     const replyInput = document.createElement("textarea");
     replyInput.className = "comment-reply-input";
     replyInput.placeholder = "Write a reply…";
     replyInput.rows = 2;
+    // Submit button. When the thread's agent toggle is on, this is the
+    // primary "Ask Agent" action — same gold styling as the per-row
+    // button used to have, so the action stands out from neutral Cancel.
+    // When agent is off, it's a plain "Post" (just records a note).
     const replySubmit = document.createElement("button");
-    replySubmit.className = "comment-action-btn";
+    replySubmit.className = threadAgentOn
+      ? "comment-action-btn ask-agent"
+      : "comment-action-btn";
     replySubmit.type = "submit";
-    replySubmit.textContent = "Post";
+    replySubmit.textContent = threadAgentOn ? "Ask Agent" : "Post";
     const replyCancel = document.createElement("button");
     replyCancel.className = "comment-action-btn";
     replyCancel.type = "button";
@@ -2095,12 +2408,29 @@
     replyActions.appendChild(replyCancel);
     replyForm.appendChild(replyInput);
     replyForm.appendChild(replyActions);
-    replyForm.addEventListener("submit", (e) => {
+    replyForm.addEventListener("submit", async (e) => {
       e.preventDefault();
       const text = replyInput.value;
+      // Snapshot the thread's mode at submit time — by the time the POST
+      // returns the user may have toggled the thread.
+      const wantAgent = isAgentEnabledForThread(threadRootId);
       replyInput.value = "";
       replyForm.hidden = true;
-      postReply(c.id, text);
+      const newId = await postReply(c.id, text);
+      if (wantAgent && newId) await requestApiResponse(newId);
+    });
+    // Enter submits the reply; Shift+Enter inserts a newline. Other
+    // modifier combos (Cmd/Ctrl/Alt+Enter) fall through to the textarea's
+    // default behavior so they don't fight system-level shortcuts.
+    replyInput.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      e.preventDefault();
+      if (typeof replyForm.requestSubmit === "function") {
+        replyForm.requestSubmit();
+      } else {
+        replyForm.dispatchEvent(new Event("submit", { cancelable: true }));
+      }
     });
     replyBtn.addEventListener("click", () => {
       const showing = !replyForm.hidden;
@@ -2111,6 +2441,132 @@
     });
     row.appendChild(replyForm);
     return row;
+  }
+
+  function countDescendants(rootId, byParent) {
+    let n = 0;
+    const stack = [rootId];
+    while (stack.length) {
+      const kids = byParent.get(stack.pop()) || [];
+      n += kids.length;
+      for (const k of kids) stack.push(k.id);
+    }
+    return n;
+  }
+
+  function buildCommentThread(root, byParent) {
+    const thread = document.createElement("div");
+    thread.className = "comment-thread";
+    if (root.resolved) thread.classList.add("resolved");
+    if (root.orphaned) thread.classList.add("orphaned");
+    if (collapsedThreads.has(root.id)) thread.classList.add("collapsed");
+    thread.dataset.threadId = root.id;
+
+    const header = document.createElement("div");
+    header.className = "comment-thread-header";
+    header.title = "Click to collapse / expand";
+
+    // Larger triangle, dedicated hit target. Clicking it ALWAYS toggles
+    // collapse — never flashes the editor — so the user has a precise
+    // affordance for collapse independent of the single/double-click
+    // distinction on the rest of the bar.
+    const chev = document.createElement("button");
+    chev.className = "thread-chev";
+    chev.type = "button";
+    chev.setAttribute("aria-label", "Toggle thread");
+    chev.title = "Collapse / expand thread";
+    header.appendChild(chev);
+
+    const anchorPreview = document.createElement("span");
+    anchorPreview.className = "thread-anchor-preview";
+    anchorPreview.textContent = commentAnchorPreview(root);
+    header.appendChild(anchorPreview);
+
+    // Streaming indicator: if any comment in the thread is mid-stream,
+    // show a pulsing dot in the header so the user knows even when the
+    // thread is collapsed.
+    const threadIsStreaming = (function () {
+      const stack = [root];
+      while (stack.length) {
+        const c = stack.pop();
+        if (c.streaming || streamingText.has(c.id)) return true;
+        const kids = byParent.get(c.id) || [];
+        for (const k of kids) stack.push(k);
+      }
+      return false;
+    })();
+    if (threadIsStreaming) {
+      const dot = document.createElement("span");
+      dot.className = "thread-streaming-dot";
+      dot.setAttribute("aria-hidden", "true");
+      header.appendChild(dot);
+    }
+
+    const replyCount = countDescendants(root.id, byParent);
+    if (replyCount > 0) {
+      const count = document.createElement("span");
+      count.className = "thread-reply-count";
+      count.textContent = String(replyCount);
+      count.title = `${replyCount} repl${replyCount === 1 ? "y" : "ies"}`;
+      header.appendChild(count);
+    }
+
+    // "Show in editor" — explicit affordance, replaces the previous
+    // double-click-on-header gesture so the single click on the header
+    // can be an instant collapse with no disambiguation delay.
+    const locateBtn = document.createElement("button");
+    locateBtn.className = "thread-locate-btn";
+    locateBtn.type = "button";
+    locateBtn.title = "Show in editor";
+    locateBtn.setAttribute("aria-label", "Show in editor");
+    locateBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M 8 7 H 17 V 16"/><path d="M 7 17 L 17 7"/></svg>';
+    locateBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      flashCommentRange(root);
+    });
+    locateBtn.addEventListener("dblclick", (e) => e.stopPropagation());
+    header.appendChild(locateBtn);
+
+    // Per-thread agent toggle in the header — controls the gold
+    // "Ask Agent" affordance inside that thread's reply form.
+    if (apiResponseEnabled) {
+      header.appendChild(buildAgentTogglePill(root.id));
+    }
+
+    const toggleCollapsed = () => {
+      const collapsed = thread.classList.toggle("collapsed");
+      if (collapsed) collapsedThreads.add(root.id);
+      else collapsedThreads.delete(root.id);
+    };
+
+    chev.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleCollapsed();
+    });
+    chev.addEventListener("dblclick", (e) => {
+      // Don't bubble — header dblclick would re-toggle and cancel.
+      e.stopPropagation();
+    });
+
+    // Single click anywhere on the header collapses / expands. No
+    // disambiguation delay — the "show in editor" affordance is a
+    // dedicated button now, so there's no second gesture to wait for.
+    header.addEventListener("click", (e) => {
+      if (e.target.closest(".thread-chev, .thread-locate-btn, .thread-agent-toggle, .comment-action-btn")) return;
+      toggleCollapsed();
+    });
+
+    thread.appendChild(header);
+
+    const body = document.createElement("div");
+    body.className = "comment-thread-body";
+    thread.appendChild(body);
+
+    return { thread, body };
   }
 
   function renderCommentsPanel() {
@@ -2142,20 +2598,72 @@
     }
     commentsListEl.replaceChildren();
     let rendered = 0;
-    function emit(c, depth) {
-      if (!showResolved && c.resolved && depth === 0) return;
-      commentsListEl.appendChild(buildCommentRow(c, depth));
-      rendered++;
-      const kids = byParent.get(c.id) || [];
-      for (const k of kids) emit(k, depth + 1);
+    for (const t of tops) {
+      if (!showResolved && t.resolved) continue;
+      // Pick the latest comment in the thread (by timestamp) so we can
+      // auto-open its reply box — the user almost always wants to type
+      // the next message after a reply lands, so save them the click.
+      // Skip auto-open on resolved threads: those are archived, not
+      // active conversations.
+      //
+      // Tie-break: server timestamps have only second precision, so the
+      // agent's streaming reply (created at run start) and a same-run
+      // `add_comment` (fired ~ms later) often share a timestamp. When
+      // they tie we want the LATER-INSERTED row to win — `state.comments`
+      // is append-only, so iteration index in `docComments` is a
+      // reliable tiebreaker (matches the conversation's actual order).
+      let latestId = null;
+      if (!t.resolved) {
+        const threadIds = new Set([t.id]);
+        const queue = [t.id];
+        while (queue.length) {
+          const id = queue.shift();
+          for (const k of byParent.get(id) || []) {
+            if (!threadIds.has(k.id)) {
+              threadIds.add(k.id);
+              queue.push(k.id);
+            }
+          }
+        }
+        let latestTs = -Infinity;
+        let latestIdx = -1;
+        for (let i = 0; i < docComments.length; i++) {
+          const c = docComments[i];
+          if (!threadIds.has(c.id)) continue;
+          const ts = Date.parse(c.ts || "") || 0;
+          if (ts > latestTs || (ts === latestTs && i > latestIdx)) {
+            latestTs = ts;
+            latestId = c.id;
+            latestIdx = i;
+          }
+        }
+      }
+      const { thread, body } = buildCommentThread(t, byParent);
+      function emit(c, depth) {
+        body.appendChild(
+          buildCommentRow(c, depth, c.id === latestId, t.id),
+        );
+        rendered++;
+        const kids = byParent.get(c.id) || [];
+        for (const k of kids) emit(k, depth + 1);
+      }
+      emit(t, 0);
+      commentsListEl.appendChild(thread);
     }
-    for (const t of tops) emit(t, 0);
     commentsEmptyEl.hidden = rendered > 0;
   }
 
   function updateCommentsBadge() {
+    // Count top-level threads only — a "comment" in the user's mental
+    // model is a thread, not each individual reply inside it. Resolving
+    // the root of a thread is treated by the sidebar as resolving the
+    // whole thread (it hides until "Show resolved" is toggled), so the
+    // badge should drop by exactly that amount.
     const n = allComments.filter(
-      (c) => c.doc === editorActiveDoc && !c.resolved,
+      (c) =>
+        c.doc === editorActiveDoc &&
+        !c.resolved &&
+        !c.parent_id,
     ).length;
     if (n > 0) {
       commentsBadge.textContent = String(n);
@@ -2172,25 +2680,232 @@
     updateCommentsBadge();
   }
 
-  // ---------- direct-API response (uses ANTHROPIC_API_KEY on the server) ----------
+  // ---------- direct-API response (orchestral multi-provider) ----------
+  // Server-side config: which providers are available (keys configured),
+  // their default models, current spend, and any caps. Refreshed on demand
+  // when an API call completes (so the indicator updates without polling).
   let apiResponseEnabled = false;
-  fetch("/api/config")
-    .then((r) => (r.ok ? r.json() : {}))
-    .then((cfg) => {
-      apiResponseEnabled = !!cfg.api_response_enabled;
-    })
-    .catch(() => {});
+  let apiConfig = null;
+  let modelCatalog = null; // { providers: { anthropic: [{model_id, friendly_name, …}], … } }
+  const PICKER_STORAGE_KEY = "modelPick"; // "provider:model"
+
+  // Per-thread agent toggle. Some threads are conversations with the
+  // agent (Enter on reply = post + ask). Others are notes-to-self (Enter
+  // = post only). We persist only the OFF threads — new threads default
+  // to agent-on so the direct-API path acts the expected way.
+  const AGENT_DISABLED_THREADS_KEY = "agentDisabledThreads";
+  const agentDisabledThreads = new Set(
+    lsGet(AGENT_DISABLED_THREADS_KEY, []),
+  );
+  function isAgentEnabledForThread(rootId) {
+    return apiResponseEnabled && !agentDisabledThreads.has(rootId);
+  }
+  function setAgentEnabledForThread(rootId, enabled) {
+    if (enabled) agentDisabledThreads.delete(rootId);
+    else agentDisabledThreads.add(rootId);
+    lsSet(AGENT_DISABLED_THREADS_KEY, Array.from(agentDisabledThreads));
+  }
+
+  function getPickedProviderModel() {
+    if (!apiConfig) return null;
+    const stored = lsGet(PICKER_STORAGE_KEY, null);
+    if (stored && typeof stored === "string" && stored.includes(":")) {
+      const [provider, ...rest] = stored.split(":");
+      const model = rest.join(":");
+      if (apiConfig.providers?.[provider]?.available) {
+        return { provider, model };
+      }
+    }
+    return {
+      provider: apiConfig.default_provider,
+      model: apiConfig.default_model,
+    };
+  }
+
+  function setPickedProviderModel(provider, model) {
+    lsSet(PICKER_STORAGE_KEY, `${provider}:${model}`);
+  }
+
+  function renderSpendIndicator() {
+    const ind = $("spend-indicator");
+    if (!ind || !apiConfig) return;
+    const today = apiConfig.spend?.today_usd ?? 0;
+    const session = apiConfig.spend?.session_usd ?? 0;
+    const dailyLimit = apiConfig.spend_limits?.daily_usd;
+    const sessionLimit = apiConfig.spend_limits?.session_usd;
+    ind.textContent = `$${today.toFixed(today < 1 ? 4 : 2)} today`;
+    ind.title =
+      `Today: $${today.toFixed(4)}\n` +
+      `Session: $${session.toFixed(4)}` +
+      (dailyLimit != null ? `\nDaily limit: $${dailyLimit.toFixed(2)}` : "") +
+      (sessionLimit != null ? `\nSession limit: $${sessionLimit.toFixed(2)}` : "");
+    // Warn visually as we approach a limit.
+    ind.classList.remove("spend-warn", "spend-over");
+    if (dailyLimit != null) {
+      if (today >= dailyLimit) ind.classList.add("spend-over");
+      else if (today >= dailyLimit * 0.8) ind.classList.add("spend-warn");
+    }
+  }
+
+  function renderModelPicker() {
+    const picker = $("model-picker");
+    const bar = $("comments-llm-bar");
+    if (!picker || !bar || !apiConfig) return;
+    if (!apiResponseEnabled) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
+    const picked = getPickedProviderModel();
+    picker.replaceChildren();
+
+    const wantValue = picked ? `${picked.provider}:${picked.model}` : null;
+    let firstAvailableValue = null;
+    let exactMatchFound = false;
+
+    const allProviders = Object.keys(apiConfig.providers || {});
+    const configured = allProviders.filter(
+      (n) => apiConfig.providers[n].available,
+    );
+    const unconfigured = allProviders.filter(
+      (n) => !apiConfig.providers[n].available,
+    );
+
+    // === Configured providers: show full model list per provider. ===
+    for (const name of configured) {
+      const meta = apiConfig.providers[name];
+      const group = document.createElement("optgroup");
+      group.label = name;
+      let options = [];
+      const catModels = modelCatalog?.providers?.[name] || [];
+      if (catModels.length) {
+        options = catModels.map((m) => ({
+          id: m.model_id,
+          label: m.friendly_name || m.model_id,
+        }));
+      } else if (meta.default_model) {
+        // Pre-catalog placeholder — instant render before lazy fetch.
+        options = [{ id: meta.default_model, label: meta.default_model }];
+      }
+      for (const o of options) {
+        const value = `${name}:${o.id}`;
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = o.label;
+        if (value === wantValue) {
+          opt.selected = true;
+          exactMatchFound = true;
+        }
+        group.appendChild(opt);
+        if (firstAvailableValue === null) firstAvailableValue = value;
+      }
+      if (options.length) picker.appendChild(group);
+    }
+
+    // === Unconfigured providers: ONE disabled hint per provider. Placed
+    // as top-level <option> elements (no wrapping <optgroup>) so they
+    // render at the same indentation as the configured optgroup labels
+    // rather than being browser-indented as group children. ===
+    if (unconfigured.length) {
+      const sep = document.createElement("option");
+      sep.disabled = true;
+      sep.textContent = "set a key to enable —";
+      picker.appendChild(sep);
+      for (const name of unconfigured) {
+        const meta = apiConfig.providers[name];
+        const opt = document.createElement("option");
+        opt.value = `__unconfigured:${name}`;
+        opt.disabled = true;
+        const needs = meta.kind === "openai"
+          ? `set ${meta.host_env}`
+          : `set ${meta.key_env || "API key"}`;
+        opt.textContent = `${name} — ${needs}`;
+        picker.appendChild(opt);
+      }
+    }
+
+    if (!exactMatchFound && firstAvailableValue) {
+      const fallback = picker.querySelector(
+        `option[value="${CSS.escape(firstAvailableValue)}"]`,
+      );
+      if (fallback) fallback.selected = true;
+    }
+    picker.onchange = () => {
+      const [provider, ...rest] = picker.value.split(":");
+      if (provider === "__unconfigured") {
+        // Bounce back to a real choice rather than persist a phantom.
+        const fallback = firstAvailableValue ? picker.querySelector(
+          `option[value="${CSS.escape(firstAvailableValue)}"]`,
+        ) : null;
+        if (fallback) {
+          fallback.selected = true;
+          const [p, ...r] = firstAvailableValue.split(":");
+          setPickedProviderModel(p, r.join(":"));
+        }
+        return;
+      }
+      setPickedProviderModel(provider, rest.join(":"));
+    };
+    picker.addEventListener("focus", ensureModelCatalog, { once: true });
+    picker.addEventListener("mousedown", ensureModelCatalog, { once: true });
+  }
+
+  async function refreshApiConfig() {
+    try {
+      const r = await fetch("/api/config");
+      if (!r.ok) return;
+      apiConfig = await r.json();
+      apiResponseEnabled = !!apiConfig.api_response_enabled;
+      renderModelPicker();
+      renderSpendIndicator();
+      renderCommentsPanel();
+      // Eagerly fetch the full model catalog so the picker is populated
+      // before the user opens it. The endpoint only walks configured
+      // providers (~ms), so there's no SDK-import penalty.
+      if (apiResponseEnabled) ensureModelCatalog();
+    } catch {
+      // ignore
+    }
+  }
+  let catalogFetchInFlight = null;
+  async function ensureModelCatalog() {
+    if (modelCatalog) return modelCatalog;
+    if (catalogFetchInFlight) return catalogFetchInFlight;
+    catalogFetchInFlight = fetch("/api/config/models")
+      .then((r) => (r.ok ? r.json() : { providers: {} }))
+      .then((data) => {
+        modelCatalog = data;
+        renderModelPicker();
+        return data;
+      })
+      .catch(() => ({ providers: {} }))
+      .finally(() => {
+        catalogFetchInFlight = null;
+      });
+    return catalogFetchInFlight;
+  }
+  refreshApiConfig();
 
   async function requestApiResponse(commentId) {
+    const picked = getPickedProviderModel() || {};
+    const body = picked.provider
+      ? { provider: picked.provider, model: picked.model }
+      : {};
     try {
       const r = await fetch(
         `/api/comments/${encodeURIComponent(commentId)}/respond`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
       );
       if (!r.ok) {
         const err = await r.text();
-        if (r.status === 503) {
-          alert("ANTHROPIC_API_KEY isn't set on the server. Either configure it and restart, or ask Claude Code to respond to the pending comment manually.");
+        if (r.status === 402) {
+          alert(`Spend limit reached. ${err.slice(0, 300)}`);
+        } else if (r.status === 503) {
+          alert(`Provider unavailable on the server: ${err.slice(0, 300)}`);
         } else {
           alert(`API reply failed (${r.status}): ${err.slice(0, 200)}`);
         }
@@ -2198,6 +2913,8 @@
     } catch (e) {
       alert(`API reply failed: ${e}`);
     }
+    // Refresh totals after the call so the indicator reflects new spend.
+    refreshApiConfig();
   }
 
   // ---------- Cmd+K inline prompt ----------
@@ -2211,18 +2928,32 @@
       cmdkPromptEl = null;
     }
   }
-  async function postUserComment(excerpt, message) {
+  async function postUserComment(anchor, message) {
     if (!message.trim()) return null;
-    try {
-      const r = await fetch("/api/comments", {
+    const base = { message: message.trim(), author: "user" };
+    const tryPost = (body) =>
+      fetch("/api/comments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          excerpt,
-          message: message.trim(),
-          author: "user",
-        }),
+        body: JSON.stringify(body),
       });
+    const body = { ...base };
+    if (anchor && anchor.type === "selection" && anchor.excerpt) {
+      body.excerpt = anchor.excerpt;
+    } else if (anchor && anchor.type === "line" && anchor.line) {
+      body.line = anchor.line;
+    }
+    try {
+      let r = await tryPost(body);
+      // Server requires the excerpt to appear EXACTLY ONCE for range
+      // anchors (so the agent can re-anchor after edits). When that
+      // fails — non-unique (409) or not found (404) — silently fall back
+      // to a line anchor at the selection's start so the user's comment
+      // still posts instead of throwing an opaque error.
+      if (!r.ok && (r.status === 409 || r.status === 404)
+          && anchor && anchor.line) {
+        r = await tryPost({ ...base, line: anchor.line });
+      }
       if (!r.ok) {
         const err = await r.text();
         alert(`Comment failed: ${err.slice(0, 200)}`);
@@ -2238,8 +2969,25 @@
 
   function openCmdkPrompt() {
     if (cmdkPromptEl) return;
-    const sel = editor.getSelection();
-    if (!sel || !sel.trim()) return;
+    // Prefer a selection as the anchor; fall back to the current line so
+    // Cmd+K is useful even without selecting first. We also always
+    // capture the line the selection starts on so postUserComment can
+    // fall back to a line anchor if the excerpt isn't unique in the doc.
+    let sel = (editor.getSelection() || "").trim();
+    let anchor;
+    if (sel) {
+      const from = editor.getCursor("from");
+      anchor = {
+        type: "selection",
+        excerpt: sel,
+        line: from.line + 1,
+        lineText: editor.getLine(from.line) || "",
+      };
+    } else {
+      const head = editor.getCursor("head");
+      const lineText = editor.getLine(head.line) || "";
+      anchor = { type: "line", excerpt: "", line: head.line + 1, lineText };
+    }
     // Position the popup near the cursor head.
     const headPos = editor.getCursor("head");
     const coords = editor.charCoords(headPos, "window");
@@ -2247,51 +2995,69 @@
     box.className = "cmdk-prompt";
     const snippet = document.createElement("div");
     snippet.className = "cmdk-prompt-snippet";
-    snippet.textContent = sel.length > 240 ? sel.slice(0, 237) + "…" : sel;
+    if (anchor.type === "selection") {
+      snippet.textContent = sel.length > 240 ? sel.slice(0, 237) + "…" : sel;
+    } else {
+      const lt = (anchor.lineText || "").trim();
+      snippet.textContent = lt
+        ? `line ${anchor.line}: ${lt.length > 200 ? lt.slice(0, 197) + "…" : lt}`
+        : `line ${anchor.line} (empty)`;
+    }
     box.appendChild(snippet);
     const input = document.createElement("textarea");
     input.className = "cmdk-prompt-input";
-    input.placeholder = "Ask, suggest, or note — leaves a comment anchored to the selection.";
+    input.placeholder = "Ask, suggest, or note…";
     box.appendChild(input);
+    // Action bar: equal-width buttons spanning the popup bottom. Each
+    // button labels itself with its keyboard shortcut inline, so we don't
+    // need a separate hint line. All three share one visual style — no
+    // primary/secondary distinction.
     const actions = document.createElement("div");
     actions.className = "cmdk-prompt-actions";
-    const hint = document.createElement("span");
-    hint.className = "cmdk-prompt-hint";
-    hint.textContent = "↩ to send · esc to cancel";
-    actions.appendChild(hint);
-    const right = document.createElement("div");
-    right.style.display = "flex";
-    right.style.gap = "6px";
-    const cancel = document.createElement("button");
-    cancel.className = "comment-action-btn";
-    cancel.type = "button";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => closeCmdkPrompt());
-    const send = document.createElement("button");
-    send.className = "comment-action-btn";
-    send.type = "button";
-    send.textContent = "Comment";
-    send.addEventListener("click", () => {
+
+    const makeBtn = (label, shortcut, onClick) => {
+      const btn = document.createElement("button");
+      btn.className = "cmdk-prompt-btn";
+      btn.type = "button";
+      const lab = document.createElement("span");
+      lab.textContent = label;
+      btn.appendChild(lab);
+      const kbd = document.createElement("span");
+      kbd.className = "cmdk-shortcut";
+      // Unicode key glyphs (↩, ⇧↩) need a larger size to read; word
+      // shortcuts like "esc" stay at the smaller default caption size.
+      if (/[↩⇧⌘⌥⌃]/.test(shortcut)) kbd.classList.add("is-glyph");
+      kbd.textContent = shortcut;
+      btn.appendChild(kbd);
+      btn.addEventListener("click", onClick);
+      return btn;
+    };
+
+    // Both action paths sticky the new thread's agent toggle to match
+    // intent: "Comment" → agent off (notes thread); "Ask agent" → agent
+    // on. Mirrors the Enter / Shift+Enter keybinding semantics above.
+    actions.appendChild(makeBtn("Cancel", "esc", () => closeCmdkPrompt()));
+    actions.appendChild(makeBtn("Comment", "↩", async () => {
       const message = input.value;
       closeCmdkPrompt();
-      postUserComment(sel, message);
-    });
-    right.appendChild(cancel);
-    right.appendChild(send);
+      const id = await postUserComment(anchor, message);
+      if (id && apiResponseEnabled) {
+        setAgentEnabledForThread(id, false);
+        renderCommentsPanel();
+      }
+    }));
     if (apiResponseEnabled) {
-      const sendAndAsk = document.createElement("button");
-      sendAndAsk.className = "comment-action-btn cmdk-ask";
-      sendAndAsk.type = "button";
-      sendAndAsk.textContent = "Comment + ask Claude";
-      sendAndAsk.addEventListener("click", async () => {
+      actions.appendChild(makeBtn("Ask agent", "⇧↩", async () => {
         const message = input.value;
         closeCmdkPrompt();
-        const id = await postUserComment(sel, message);
-        if (id) await requestApiResponse(id);
-      });
-      right.appendChild(sendAndAsk);
+        const id = await postUserComment(anchor, message);
+        if (id) {
+          setAgentEnabledForThread(id, true);
+          renderCommentsPanel();
+          await requestApiResponse(id);
+        }
+      }));
     }
-    actions.appendChild(right);
     box.appendChild(actions);
     document.body.appendChild(box);
     cmdkPromptEl = box;
@@ -2304,15 +3070,30 @@
       if (e.key === "Escape") {
         e.preventDefault();
         closeCmdkPrompt();
-      } else if (e.key === "Enter" && !e.shiftKey) {
-        // Plain Enter posts the comment.
-        // Cmd/Ctrl+Enter additionally asks Claude (if API enabled).
+      } else if (e.key === "Enter") {
+        // Enter posts a plain comment; Shift+Enter additionally asks the
+        // agent (when the API path is enabled). Multi-line entry isn't
+        // supported via the keyboard here — the popup is sized for a
+        // sentence or two; long messages go through the sidebar reply
+        // form instead.
         e.preventDefault();
         const message = input.value;
-        const wantApi = (e.metaKey || e.ctrlKey) && apiResponseEnabled;
+        const wantApi = e.shiftKey && apiResponseEnabled;
         closeCmdkPrompt();
-        const id = await postUserComment(sel, message);
-        if (wantApi && id) await requestApiResponse(id);
+        const id = await postUserComment(anchor, message);
+        if (id) {
+          // Sticky the new thread's agent toggle to match the user's
+          // choice at creation: plain Enter → agent off (notes mode);
+          // Shift+Enter → agent on. Avoids surprising the user when
+          // they later reply in a "note" thread and Enter suddenly
+          // invokes the agent. The user can flip it via the toggle pill
+          // at any time.
+          if (apiResponseEnabled) {
+            setAgentEnabledForThread(id, wantApi);
+            renderCommentsPanel();
+          }
+          if (wantApi) await requestApiResponse(id);
+        }
       }
     });
     requestAnimationFrame(() => input.focus());
