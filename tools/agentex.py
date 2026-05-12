@@ -66,21 +66,35 @@ def _server_up(timeout: float = 1.0) -> bool:
 
 
 @define_tool(base=StatelessRuntimeTool)
-def ensure_server_running(wait_seconds: int = 6) -> dict[str, Any]:
+def ensure_server_running(
+    wait_seconds: int = 6,
+    project_path: str = "",
+) -> dict[str, Any]:
     """Make sure the agenTeX web server is reachable on its expected port.
 
     Call this at the start of any agenTeX session, before invoking edit_doc
-    or stream_edit. If the server is already up, returns immediately. If it's
-    down, spawns `python server.py` as a detached background process and
-    waits up to `wait_seconds` seconds for the port to become reachable.
+    or stream_edit. If the server is already up, returns immediately (the
+    running server's project path is whatever was passed when IT was
+    launched — this tool does NOT restart a running server to repoint it).
+    If it's down, spawns `python server.py [project_path]` as a detached
+    background process and waits up to `wait_seconds` seconds for the port
+    to become reachable.
+
+    `project_path`: optional absolute path to root the editor at. When
+    given, `.agentex` and `.build` live inside that path. When empty, the
+    server uses AGENTEX_PROJECT from the environment, falling back to the
+    in-repo `docs/`.
 
     The spawned process survives the MCP server's lifetime --- if Claude
     Code exits, the user's browser session keeps working.
     """
     if _server_up():
         return {"running": True, "started": False, "base": AGENTEX_BASE}
+    cmd = [SERVER_PYTHON, "server.py"]
+    if project_path:
+        cmd.append(project_path)
     proc = subprocess.Popen(
-        [SERVER_PYTHON, "server.py"],
+        cmd,
         cwd=str(AGENTEX_ROOT),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -90,12 +104,19 @@ def ensure_server_running(wait_seconds: int = 6) -> dict[str, Any]:
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         if _server_up():
-            return {"running": True, "started": True, "pid": proc.pid, "base": AGENTEX_BASE}
+            return {
+                "running": True,
+                "started": True,
+                "pid": proc.pid,
+                "base": AGENTEX_BASE,
+                "project_path": project_path or None,
+            }
         time.sleep(0.3)
     return {
         "running": False,
         "started": False,
         "pid": proc.pid,
+        "project_path": project_path or None,
         "error": f"server did not become reachable within {wait_seconds}s",
     }
 

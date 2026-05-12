@@ -6,12 +6,20 @@ import logging
 import os
 import re
 import shutil
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+# When this file is run via `python server.py` it loads as __main__, so a
+# later `import server` from in-process tools would re-execute the file
+# as a SECOND module — fresh `state`, no lifespan, no event loop. Alias
+# the running module under both names so `import server` always returns
+# this instance regardless of launch method.
+sys.modules.setdefault("server", sys.modules[__name__])
 
 # Auto-load .env if python-dotenv is installed. We don't require dotenv as
 # a hard dependency — users can source the .env file in their shell instead.
@@ -30,11 +38,46 @@ from watchdog.observers.polling import PollingObserver
 log = logging.getLogger("agentex")
 
 ROOT = Path(__file__).parent
-DOCS = ROOT / "docs"
+
+# Project root. Positional CLI arg → AGENTEX_PROJECT env → ROOT/docs.
+# Used as the docs tree root that the editor surfaces, the LaTeX build
+# input, and (when explicitly supplied) the parent of .agentex / .build.
+# Default falls back to the in-repo `docs/` so the legacy single-tenant
+# setup keeps working without flags.
+_DEFAULT_DOCS = ROOT / "docs"
+
+
+def _resolve_project_path() -> Path | None:
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if args:
+        return Path(args[0]).expanduser()
+    env = os.environ.get("AGENTEX_PROJECT") or os.environ.get("AGENTEX_DOCS")
+    if env:
+        return Path(env).expanduser()
+    return None
+
+
+_custom_docs = _resolve_project_path()
+if _custom_docs is not None:
+    DOCS = _custom_docs.resolve()
+    if not DOCS.is_dir():
+        print(
+            f"agenTeX: project path is not a directory: {DOCS}\n"
+            f"  pass an existing dir as the first arg or via AGENTEX_PROJECT.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # State + builds live INSIDE the project so multiple projects don't
+    # share comments or build artifacts.
+    AGENTEX = DOCS / ".agentex"
+    BUILD = DOCS / ".build"
+else:
+    DOCS = _DEFAULT_DOCS
+    AGENTEX = ROOT / ".agentex"
+    BUILD = ROOT / ".build"
+
 TEMPLATES = ROOT / "templates"
-BUILD = ROOT / ".build"
 STATIC = ROOT / "static"
-AGENTEX = ROOT / ".agentex"
 SNAPSHOTS = AGENTEX / "snapshots"
 TIMELINE_LOG = AGENTEX / "timeline.jsonl"
 AGENTEX_CONFIG = AGENTEX / "config.json"
@@ -49,6 +92,13 @@ RENDER_DEBOUNCE = 0.4
 DOC_NAME_RE = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.(tex|bib|md|txt)$")
 DIR_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 DOC_GLOBS = ("**/*.tex", "**/*.bib", "**/*.md", "**/*.txt")
+# Non-editable but show-in-tree assets. PDFs, raster + vector images.
+# Surfaced grayed-out so the user sees their figs/ directory contents
+# without being able to click-to-edit them.
+ASSET_GLOBS = (
+    "**/*.pdf", "**/*.png", "**/*.jpg", "**/*.jpeg",
+    "**/*.svg", "**/*.eps", "**/*.gif", "**/*.webp",
+)
 RENDERABLE_SUFFIXES = (".tex", ".md")
 
 
@@ -56,6 +106,12 @@ def _check_segments(name: str) -> bool:
     """Reject '.' and '..' segments. The regexes allow them through because
     both match [A-Za-z0-9._-]+; this is the explicit no-escape check."""
     return all(seg not in (".", "..") for seg in name.split("/"))
+
+
+def _is_hidden_rel(rel: Path) -> bool:
+    """True if any path segment starts with '.' — skips .agentex / .build /
+    .git / etc. when the project root contains them (custom-path case)."""
+    return any(part.startswith(".") for part in rel.parts)
 
 
 def list_doc_names() -> list[str]:
@@ -66,6 +122,25 @@ def list_doc_names() -> list[str]:
             try:
                 rel = p.resolve().relative_to(docs_resolved)
             except ValueError:
+                continue
+            if _is_hidden_rel(rel):
+                continue
+            names.add(rel.as_posix())
+    return sorted(names)
+
+
+def list_asset_names() -> list[str]:
+    """Non-editable files (figures, PDFs) visible in the tree. Same hidden-
+    dir filter as docs so build artifacts under .build/ don't leak in."""
+    names: set[str] = set()
+    docs_resolved = DOCS.resolve()
+    for pattern in ASSET_GLOBS:
+        for p in DOCS.glob(pattern):
+            try:
+                rel = p.resolve().relative_to(docs_resolved)
+            except ValueError:
+                continue
+            if _is_hidden_rel(rel):
                 continue
             names.add(rel.as_posix())
     return sorted(names)
@@ -82,6 +157,8 @@ def list_doc_dirs() -> list[str]:
         try:
             rel = p.resolve().relative_to(docs_resolved)
         except ValueError:
+            continue
+        if _is_hidden_rel(rel):
             continue
         out.append(rel.as_posix())
     return sorted(out)
@@ -247,6 +324,7 @@ async def broadcast_doc_list() -> None:
             "type": "doc_list",
             "names": list_doc_names(),
             "dirs": list_doc_dirs(),
+            "assets": list_asset_names(),
             "active": rel_name(state.active_doc),
             "render_target": rel_name(state.render_target),
         }
@@ -1022,6 +1100,7 @@ async def get_docs() -> dict:
     return {
         "names": list_doc_names(),
         "dirs": list_doc_dirs(),
+        "assets": list_asset_names(),
         "active": rel_name(state.active_doc),
         "render_target": rel_name(state.render_target),
     }
@@ -1945,75 +2024,267 @@ def _format_anchor_for_prompt(root: dict, doc_content: str) -> str:
     return "anchored to the document as a whole"
 
 
-# Provider name -> (orchestral attribute, default model, expected api-key env var)
-_LLM_PROVIDERS = {
-    "anthropic": ("Claude", "claude-sonnet-4-5", "ANTHROPIC_API_KEY"),
-    "openai": ("GPT", "gpt-4o-mini", "OPENAI_API_KEY"),
-    "google": ("Gemini", "gemini-2.0-flash-exp", "GOOGLE_API_KEY"),
-    "groq": ("Groq", "llama-3.3-70b-versatile", "GROQ_API_KEY"),
-    "mistral": ("MistralAI", "mistral-large-latest", "MISTRAL_API_KEY"),
-    "ollama": ("Ollama", "llama3.1", ""),  # local, no key
-    "bedrock": ("Bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0", "AWS_ACCESS_KEY_ID"),
-    "vllm": ("VLLM", "", ""),
+# Each entry describes how to construct an orchestral LLM client for the
+# provider. "native" providers map directly to an orchestral.llm class.
+# "openai_compatible" providers (vLLM, LiteLLM) share a wire protocol and
+# are built via _build_openai_compatible_client below.
+#
+#   kind="native":  needs orchestral_attr + key_env (key_env can be "" for
+#                   local providers like Ollama).
+#   kind="openai":  needs host_env + key_env (key_fallback is used when
+#                   key_env is unset, e.g. "dummy" for vLLM servers
+#                   launched without --api-key).
+_LLM_PROVIDERS: dict[str, dict] = {
+    "anthropic": {
+        "kind": "native", "orchestral_attr": "Claude",
+        "default_model": "claude-sonnet-4-5",
+        "key_env": "ANTHROPIC_API_KEY",
+    },
+    "openai": {
+        "kind": "native", "orchestral_attr": "GPT",
+        "default_model": "gpt-4o-mini",
+        "key_env": "OPENAI_API_KEY",
+    },
+    "google": {
+        "kind": "native", "orchestral_attr": "Gemini",
+        "default_model": "gemini-2.0-flash-exp",
+        "key_env": "GOOGLE_API_KEY",
+    },
+    "groq": {
+        "kind": "native", "orchestral_attr": "Groq",
+        "default_model": "llama-3.3-70b-versatile",
+        "key_env": "GROQ_API_KEY",
+    },
+    "mistral": {
+        "kind": "native", "orchestral_attr": "MistralAI",
+        "default_model": "mistral-large-latest",
+        "key_env": "MISTRAL_API_KEY",
+    },
+    "ollama": {
+        "kind": "native", "orchestral_attr": "Ollama",
+        "default_model": "llama3.1",
+        "key_env": "",  # local
+    },
+    "bedrock": {
+        "kind": "native", "orchestral_attr": "Bedrock",
+        "default_model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "key_env": "AWS_ACCESS_KEY_ID",
+    },
+    "vllm": {
+        "kind": "openai", "default_model": "",
+        "host_env": "AGENTEX_VLLM_HOST",
+        "key_env": "VLLM_API_KEY", "key_fallback": "dummy",
+    },
+    "litellm": {
+        "kind": "openai", "default_model": "",
+        "host_env": "AGENTEX_LITELLM_HOST",
+        "key_env": "LITELLM_API_KEY", "key_fallback": "",
+    },
 }
 
 
-def _selected_provider() -> str:
-    return (os.environ.get("AGENTEX_API_PROVIDER") or "anthropic").lower()
-
-
-def _selected_model() -> str:
-    model = os.environ.get("AGENTEX_API_MODEL")
-    if model:
-        return model
-    prov = _selected_provider()
-    if prov in _LLM_PROVIDERS:
-        return _LLM_PROVIDERS[prov][1]
-    return ""
-
-
-def _api_key_present() -> bool:
-    prov = _selected_provider()
-    if prov not in _LLM_PROVIDERS:
-        return False
-    key_var = _LLM_PROVIDERS[prov][2]
-    if not key_var:
-        return True  # provider doesn't need a key (e.g., local Ollama)
-    return bool(os.environ.get(key_var))
-
-
-def _make_llm_client():
-    """Lazily construct an orchestral LLM client from env config. Raises
-    ValueError on misconfiguration; callers surface as 503."""
-    prov = _selected_provider()
-    if prov not in _LLM_PROVIDERS:
+def _provider_spec(provider: str) -> dict:
+    spec = _LLM_PROVIDERS.get(provider.lower())
+    if not spec:
         raise ValueError(
-            f"AGENTEX_API_PROVIDER={prov!r} is not one of "
+            f"unknown provider {provider!r}; valid: "
             f"{', '.join(sorted(_LLM_PROVIDERS))}"
         )
-    attr, default_model, _ = _LLM_PROVIDERS[prov]
-    model = _selected_model() or default_model
+    return spec
+
+
+def _resolve_provider(override: str | None = None) -> str:
+    return (override or os.environ.get("AGENTEX_API_PROVIDER") or "anthropic").lower()
+
+
+def _resolve_model(provider: str, override: str | None = None) -> str:
+    if override:
+        return override
+    # AGENTEX_API_MODEL is a single model id, so it only makes sense for
+    # the currently-selected default provider. Returning "claude-sonnet-4-5"
+    # as Ollama's default (for example) would just mislead the picker UI.
+    env_default = os.environ.get("AGENTEX_API_MODEL")
+    if env_default and provider == _resolve_provider():
+        return env_default
+    return _provider_spec(provider)["default_model"]
+
+
+def _resolve_host(provider: str, override: str | None = None) -> str:
+    spec = _provider_spec(provider)
+    if spec["kind"] != "openai":
+        return ""
+    if override:
+        return override
+    return os.environ.get(spec["host_env"]) or ""
+
+
+def _api_key_present(provider: str) -> bool:
+    """True when the provider can be used without further config (key
+    present, or none required)."""
+    spec = _provider_spec(provider)
+    if spec["kind"] == "openai":
+        # openai-compatible needs at least a host; key can fall back.
+        return bool(_resolve_host(provider))
+    key_env = spec["key_env"]
+    if not key_env:
+        return True  # local provider (Ollama)
+    return bool(os.environ.get(key_env))
+
+
+def _build_openai_compatible_client(*, host: str, model: str, api_key: str, label: str):
+    """Construct an orchestral GPT instance pointed at an OpenAI-compatible
+    endpoint (vLLM, LiteLLM, or any server speaking the OpenAI wire format).
+    Bypasses GPT.__init__'s model-name validation by hand-building the
+    instance. Ported from heptapod-stk/heptapod/llm/utils.py."""
+    import openai
+    from orchestral.llm import GPT
+    from orchestral.llm.base.llm import LLM
+
+    if not host:
+        raise ValueError(f"no {label} host configured (set AGENTEX_{label.upper()}_HOST)")
+    if not model:
+        raise ValueError(f"no {label} model specified (pass model=... or set AGENTEX_API_MODEL)")
+
+    gpt = GPT.__new__(GPT)
+    LLM.__init__(gpt, tools=None)
+    gpt.model = model
+    gpt.api_key = api_key
+    gpt.client = openai.Client(api_key=api_key, base_url=host, timeout=60.0)
+    return gpt
+
+
+def _make_llm_client(provider: str, model: str, host: str = ""):
+    """Lazily construct an orchestral LLM client for the given selection."""
+    spec = _provider_spec(provider)
     try:
-        import orchestral.llm as ollm
+        import orchestral.llm as ollm  # noqa: F401  (lazy load)
     except ImportError as e:
         raise ValueError(f"orchestral not installed: {e}")
-    Provider = getattr(ollm, attr)
+
+    if spec["kind"] == "openai":
+        api_key = os.environ.get(spec["key_env"], "") or spec.get("key_fallback", "")
+        return _build_openai_compatible_client(
+            host=host, model=model, api_key=api_key, label=provider,
+        )
+
+    Provider = getattr(ollm, spec["orchestral_attr"])
     return Provider(model=model)
 
 
+# ---------- spend tracking ----------
+_SESSION_SPEND_USD = 0.0
+
+
+def _record_spend(provider: str, model: str, usage, comment_id: str) -> None:
+    """Append a spend entry to .agentex/spend.jsonl. Best-effort: a write
+    failure must not break the response."""
+    global _SESSION_SPEND_USD
+    cost = float(getattr(usage, "cost", 0.0) or 0.0)
+    tokens = getattr(usage, "tokens", {}) or {}
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "provider": provider,
+        "model": model,
+        "comment_id": comment_id,
+        "cost_usd": cost,
+        "tokens": tokens,
+    }
+    _SESSION_SPEND_USD += cost
+    try:
+        AGENTEX.mkdir(parents=True, exist_ok=True)
+        with SPEND_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
+def _read_spend_log() -> list[dict]:
+    if not SPEND_LOG.exists():
+        return []
+    out: list[dict] = []
+    try:
+        for line in SPEND_LOG.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
+def _spend_totals() -> dict:
+    today = datetime.now(timezone.utc).date().isoformat()
+    entries = _read_spend_log()
+    daily = sum(e.get("cost_usd", 0.0) for e in entries if e.get("ts", "").startswith(today))
+    all_time = sum(e.get("cost_usd", 0.0) for e in entries)
+    return {
+        "session_usd": round(_SESSION_SPEND_USD, 6),
+        "today_usd": round(daily, 6),
+        "all_time_usd": round(all_time, 6),
+        "n_calls": len(entries),
+    }
+
+
+def _spend_limits() -> dict:
+    daily = os.environ.get("AGENTEX_SPEND_LIMIT_DAILY")
+    session = os.environ.get("AGENTEX_SPEND_LIMIT_SESSION")
+    return {
+        "daily_usd": float(daily) if daily else None,
+        "session_usd": float(session) if session else None,
+    }
+
+
+def _check_spend_limits() -> None:
+    """Raise HTTPException(402) if a spend limit would be exceeded by another
+    call. Conservative: we don't pre-deduct, just block once we're over."""
+    limits = _spend_limits()
+    totals = _spend_totals()
+    if limits["daily_usd"] is not None and totals["today_usd"] >= limits["daily_usd"]:
+        raise HTTPException(
+            402,
+            f"daily spend limit reached "
+            f"(${totals['today_usd']:.2f} / ${limits['daily_usd']:.2f}); "
+            f"set AGENTEX_SPEND_LIMIT_DAILY higher or wait until tomorrow",
+        )
+    if limits["session_usd"] is not None and totals["session_usd"] >= limits["session_usd"]:
+        raise HTTPException(
+            402,
+            f"session spend limit reached "
+            f"(${totals['session_usd']:.2f} / ${limits['session_usd']:.2f}); "
+            f"restart the server or raise AGENTEX_SPEND_LIMIT_SESSION",
+        )
+
+
 @app.post("/api/comments/{comment_id}/respond")
-async def respond_to_comment(comment_id: str) -> dict:
+async def respond_to_comment(comment_id: str, payload: dict | None = None) -> dict:
     """Generate an agent reply to a user comment via the configured LLM
     provider (orchestral). The reply is posted as a thread reply under
-    the conversation's root comment. Returns 503 when the provider's API
-    key is not set — callers can degrade to the Claude Code/Desktop path."""
-    if not _api_key_present():
-        prov = _selected_provider()
-        key_var = _LLM_PROVIDERS.get(prov, (None, None, ""))[2]
-        raise HTTPException(
-            503,
-            f"{key_var or 'API key'} not set for provider {prov!r}",
-        )
+    the conversation's root comment.
+
+    Optional body overrides for per-request A/B testing across providers
+    and models without restarting the server:
+      {"provider": "openai", "model": "gpt-4o", "host": "..."}
+    Any field omitted falls back to the env-driven default.
+    """
+    payload = payload or {}
+    try:
+        provider = _resolve_provider(payload.get("provider"))
+        model = _resolve_model(provider, payload.get("model"))
+        host = _resolve_host(provider, payload.get("host"))
+        if not _api_key_present(provider):
+            spec = _provider_spec(provider)
+            if spec["kind"] == "openai":
+                raise HTTPException(503, f"no host configured for {provider!r}")
+            key_env = spec["key_env"] or "API key"
+            raise HTTPException(503, f"{key_env} not set for provider {provider!r}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    _check_spend_limits()
 
     target = _find_comment(comment_id)
     if not target:
@@ -2029,76 +2300,365 @@ async def respond_to_comment(comment_id: str) -> dict:
     thread_text = _format_thread_for_prompt(root_id, comment_id)
 
     system_prompt = (
-        "You are reviewing a LaTeX document inside agenTeX, a live writing "
-        "interface. The user has left a comment on a passage and is asking "
-        "for your reply. Respond conversationally and substantively. Keep "
-        "responses concise (a few sentences to a short paragraph). Do NOT "
-        "modify the document — your reply will be posted as a comment "
-        "thread reply, not as an edit."
+        "You are an agent inside agenTeX, a live LaTeX writing interface. "
+        "The user has left a comment and wants your reply. Your job is to "
+        "respond DIRECTLY to the user's message marked [respond to this] "
+        "below — not to summarize the anchored passage or the document at "
+        "large. The reply you write becomes a comment thread post.\n\n"
+        "Tools: browsing (list_docs, read_doc, list_comments), threading "
+        "(add_comment, resolve_comment, delete_comment), editing "
+        "(edit_doc, stream_edit, set_active_doc, new_doc, move_doc). Use "
+        "them when they meaningfully improve the response. Be conservative "
+        "about edits: only modify the doc when the user explicitly asks "
+        "for a textual change. Otherwise discuss in your reply and let the "
+        "user decide.\n\n"
+        "Keep replies concise (a few sentences to a short paragraph)."
     )
 
+    # Find the target comment's message text so we can foreground it. The
+    # full thread + doc still go into the prompt as context, but they live
+    # below the explicit user request to keep the model focused.
+    target_msg = (target.get("message") or "").strip()
+
     user_prompt = (
-        f"<document path=\"{doc_rel}\">\n{doc_content}\n</document>\n\n"
-        f"Comment thread {anchor_desc}.\n\n"
-        f"Thread so far:\n{thread_text}"
+        "USER'S MESSAGE (respond to this):\n"
+        f"{target_msg!r}\n\n"
+        "---\n"
+        f"Context — comment thread {anchor_desc}.\n\n"
+        f"Full thread (newest message marked [respond to this]):\n"
+        f"{thread_text}\n\n"
+        f"---\n"
+        f"Document (path={doc_rel!r}):\n"
+        f"{doc_content}"
     )
 
     try:
+        from orchestral import Agent
         from orchestral.context import Context
-        from orchestral.context.message import Message
-        client = _make_llm_client()
+        from tools.in_process_tools import AGENT_TOOLS
+        client = _make_llm_client(provider, model, host)
     except (ImportError, ValueError) as e:
         raise HTTPException(503, str(e))
 
+    # Tool-driven agent: the model can call ListDocs / ReadDoc / ListComments
+    # mid-response to gather more context than the initial prompt carries.
+    # Tools run in-process (tools/in_process_tools.py) so latency is ~µs not ms.
     ctx = Context(system_prompt=system_prompt)
-    ctx.add_message(Message(role="user", text=user_prompt))
 
-    try:
-        resp = await asyncio.to_thread(client.get_response, ctx)
-    except Exception as e:
-        raise HTTPException(502, f"LLM call failed: {e}")
-
-    reply_text = (getattr(resp.message, "text", "") or "").strip()
-    if not reply_text:
-        raise HTTPException(502, "LLM returned empty content")
-
+    # Create a placeholder reply BEFORE streaming so the frontend can render
+    # an empty row and fill it in as chunks arrive. `events` is the
+    # chronological log of what the agent produced — text segments and
+    # tool calls in the order they happened. `tool_calls` is kept as a
+    # filtered view for older consumers; `message` is the concatenated
+    # text for plain-text use.
     reply_entry = {
         "id": next_comment_id(),
         "doc": doc_rel,
-        "message": reply_text,
+        "message": "",
         "author": "agent",
+        "provider": provider,
+        "model": model,
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "resolved": False,
         "orphaned": False,
         "parent_id": root_id,
         "kind": "reply",
         "parent_kind": root.get("kind"),
+        "streaming": True,
+        "events": [],
+        "tool_calls": [],
     }
     state.comments.append(reply_entry)
+    await broadcast_comments()
+
+    loop = asyncio.get_running_loop()
+    reply_id = reply_entry["id"]
+
+    def _emit(payload: dict) -> None:
+        """Schedule a WS broadcast from the worker thread."""
+        asyncio.run_coroutine_threadsafe(state.broadcast(payload), loop)
+
+    # Subclass Agent on the fly to capture tool-call lifecycle. We do this
+    # rather than the bundled tool_stream_callback because we want one
+    # event when the tool STARTS (so the UI can show a pill in "running"
+    # state) and a second when it COMPLETES (with result + runtime).
+    class _StreamingAgent(Agent):
+        def _handle_tool_call(self, tool_call):
+            args = dict(getattr(tool_call, "arguments", {}) or {})
+            _emit({
+                "type": "agent_tool_call_start",
+                "comment_id": reply_id,
+                "call_id": tool_call.id,
+                "tool_name": tool_call.tool_name,
+                "args": args,
+            })
+            super()._handle_tool_call(tool_call)
+            last = self.context.messages[-1] if self.context.messages else None
+            result_text = (getattr(last, "text", "") or "")[:1500]
+            failed = bool(getattr(last, "failed", False))
+            runtime_ms = float(
+                (getattr(last, "metadata", {}) or {}).get("runtime_ms", 0.0) or 0.0
+            )
+            record = {
+                "id": tool_call.id,
+                "name": tool_call.tool_name,
+                "args": args,
+                "result": result_text,
+                "failed": failed,
+                "runtime_ms": runtime_ms,
+            }
+            reply_entry["tool_calls"].append(record)
+            reply_entry["events"].append({"type": "tool_call", **record})
+            _emit({
+                "type": "agent_tool_call_end",
+                "comment_id": reply_id,
+                "call_id": tool_call.id,
+                "tool_name": tool_call.tool_name,
+                "result": result_text,
+                "failed": failed,
+                "runtime_ms": runtime_ms,
+            })
+
+    def _stream_worker() -> tuple[str, float]:
+        """Drive the agent loop in a worker thread, with both streaming AND
+        tool calls. orchestral's `stream_text_message` only streams one
+        LLM call (no tool loop); `Agent.run` has the tool loop but no
+        streaming. We compose them: stream the response, add it to
+        context, run any tool calls, repeat.
+
+        Returns (accumulated_text, total_cost_usd).
+        """
+        from orchestral.context.message import Message
+
+        agent = _StreamingAgent(
+            llm=client,
+            context=ctx,
+            system_prompt=system_prompt,
+            tools=list(AGENT_TOOLS),
+            max_tool_interations=6,
+        )
+        # Seed the user turn once; subsequent LLM turns re-use the same
+        # context with tool-result messages appended in between.
+        agent.context.add_message(Message(role="user", text=user_prompt))
+
+        accumulated = ""
+        current_segment = ""  # text within the current LLM turn
+
+        def _flush_text():
+            nonlocal current_segment
+            if current_segment:
+                reply_entry["events"].append({
+                    "type": "text", "text": current_segment,
+                })
+                current_segment = ""
+
+        max_rounds = 7  # 1 initial + up to 6 tool-iteration rounds
+        for _ in range(max_rounds):
+            gen = agent.llm.stream_response(agent.context)
+            response = None
+            try:
+                while True:
+                    chunk = next(gen)
+                    if not chunk:
+                        continue
+                    accumulated += chunk
+                    current_segment += chunk
+                    _emit({
+                        "type": "agent_stream_chunk",
+                        "comment_id": reply_id,
+                        "text": chunk,
+                    })
+            except StopIteration as stop:
+                response = stop.value
+            if response is None:
+                break
+            # The Response goes into context BEFORE handling tool calls
+            # (handler reads context.messages[-1] to find the latest).
+            agent.context.add_message(response)
+            tool_calls = getattr(response.message, "tool_calls", None) or []
+            # Flush text-so-far as an event BEFORE any tool calls, so the
+            # event log preserves "text -> tool -> next text" ordering.
+            _flush_text()
+            if not tool_calls:
+                break
+            agent._handle_tool_calls()  # fires _handle_tool_call (appends tool_call events)
+        _flush_text()  # final tail of text, if any
+        return accumulated, agent.get_total_cost()
+
+    # On any error inside the agent loop we keep the placeholder (with
+    # whatever text + tool calls it accumulated) and surface the failure
+    # inline. Deleting the row hides what just happened — losing the pills
+    # the user was watching — which makes debugging impossible.
+    error_text: str | None = None
+    accumulated = ""
+    total_cost = 0.0
+    try:
+        accumulated, total_cost = await asyncio.to_thread(_stream_worker)
+    except Exception as e:
+        log.exception("agent loop failed (comment %s)", reply_id)
+        error_text = f"{type(e).__name__}: {e}"
+
+    reply_text = (accumulated or "").strip()
+    if error_text:
+        # Append the error onto whatever streamed so far, mark the comment
+        # as failed, and broadcast. No HTTPException — the comment itself
+        # carries the failure state, so the UI can render it.
+        msg = reply_text + ("\n\n" if reply_text else "")
+        msg += f"[error] agent loop failed: {error_text}"
+        reply_entry["message"] = msg
+        reply_entry["streaming"] = False
+        reply_entry["failed"] = True
+        reply_entry["error"] = error_text
+        save_comments()
+        await broadcast_comments()
+        await state.broadcast({
+            "type": "agent_stream_end",
+            "comment_id": reply_id,
+        })
+        return {"ok": False, "comment": reply_entry, "error": error_text}
+
+    if not reply_text:
+        # Loop succeeded but the model never emitted text (only tool calls
+        # that returned nothing useful, or empty final turn). Mark failed
+        # rather than silently dropping the row.
+        reply_entry["message"] = "[error] agent finished without emitting reply text."
+        reply_entry["streaming"] = False
+        reply_entry["failed"] = True
+        save_comments()
+        await broadcast_comments()
+        await state.broadcast({
+            "type": "agent_stream_end",
+            "comment_id": reply_id,
+        })
+        return {"ok": False, "comment": reply_entry, "error": "empty reply"}
+
+    # Record spend from the agent's accumulated cost across all LLM turns
+    # (not just the last one). Fabricate a minimal Usage-shaped object.
+    class _AggUsage:
+        def __init__(self, cost: float):
+            self.cost = cost
+            self.tokens: dict = {}
+    _record_spend(provider, model, _AggUsage(total_cost), comment_id)
+
+    reply_entry["message"] = reply_text
+    reply_entry["streaming"] = False
     save_comments()
     await broadcast_comments()
+    await state.broadcast({
+        "type": "agent_stream_end",
+        "comment_id": reply_id,
+    })
     return {"ok": True, "comment": reply_entry}
 
 
 @app.get("/api/config")
 async def get_config() -> dict:
-    """Feature flags + LLM selection surfaced to the frontend."""
+    """Feature flags + LLM selection surfaced to the frontend. Returns
+    enablement per provider so the picker UI can grey out unconfigured
+    ones."""
+    default_provider = _resolve_provider()
+    providers = {}
+    for name in _LLM_PROVIDERS:
+        try:
+            spec = _provider_spec(name)
+            providers[name] = {
+                "available": _api_key_present(name),
+                "default_model": _resolve_model(name),
+                "kind": spec["kind"],
+                "key_env": spec.get("key_env", ""),
+                "host_env": spec.get("host_env", ""),
+                "host": _resolve_host(name) if spec["kind"] == "openai" else "",
+            }
+        except ValueError:
+            providers[name] = {"available": False}
     return {
-        "api_response_enabled": _api_key_present(),
-        "api_provider": _selected_provider(),
-        "api_model": _selected_model(),
+        "default_provider": default_provider,
+        "default_model": _resolve_model(default_provider),
+        "providers": providers,
+        "api_response_enabled": any(p.get("available") for p in providers.values()),
+        "spend": _spend_totals(),
+        "spend_limits": _spend_limits(),
     }
+
+
+_DATED_MODEL_RE = re.compile(r"-\d{8}$")
+
+# Models retired by their provider — the catalog upstream (orchestral)
+# still lists them, but the API returns 404 if you try to call them. We
+# filter these out at the picker so users can't accidentally pick a dead
+# id. Cross-checked against Anthropic's live /v1/models endpoint; add
+# (provider, model_id) tuples as they're retired.
+_RETIRED_MODELS: set[tuple[str, str]] = {
+    # Claude 3 Haiku — retired 2025
+    ("anthropic", "claude-3-haiku-20240307"),
+    # Claude 3.5 Haiku — retired
+    ("anthropic", "claude-3-5-haiku-20241022"),
+    ("anthropic", "claude-3-5-haiku-latest"),
+    # Claude 3.7 Sonnet — retired
+    ("anthropic", "claude-3-7-sonnet-20250219"),
+    ("anthropic", "claude-3-7-sonnet-latest"),
+    # Stale date in orchestral's catalog: the live id is 20251001, not
+    # 20251015. The non-dated `claude-haiku-4-5` alias routes correctly.
+    ("anthropic", "claude-haiku-4-5-20251015"),
+}
 
 
 @app.get("/api/config/models")
 async def get_available_models() -> dict:
-    """Catalog of providers + models supported by orchestral. Lets the
-    frontend surface a model picker."""
-    try:
-        from orchestral.llm import get_available_models as _avail
-        return {"providers": _avail()}
-    except Exception as e:
-        return {"providers": {}, "error": str(e)}
+    """Catalog of provider + model entries for the frontend picker.
+
+    Only loads catalogs for providers that have keys configured — bypasses
+    orchestral.llm.get_available_models() which force-imports every SDK
+    for ~7s on first call. Per-provider model_details is millisecond-cheap.
+
+    Dedup rule: when two model_ids share a friendly_name (e.g.
+    `claude-sonnet-4-5` and `claude-sonnet-4-5-20250929` both surface as
+    "Claude Sonnet 4.5"), prefer the alias (no -YYYYMMDD suffix). The
+    alias auto-tracks the current stable and is what `AGENTEX_API_MODEL`
+    defaults expect.
+    """
+    providers: dict[str, list] = {}
+    for name in _LLM_PROVIDERS:
+        if not _api_key_present(name):
+            continue
+        try:
+            mod = __import__(
+                f"orchestral.llm.{name}.model_details",
+                fromlist=["MODEL_DETAILS"],
+            )
+        except ImportError:
+            continue
+        # Pass 1: bucket by friendly_name, preferring the non-dated id.
+        chosen: dict[str, dict] = {}
+        order: list[str] = []
+        for model_id, details in (mod.MODEL_DETAILS or {}).items():
+            if (name, model_id) in _RETIRED_MODELS:
+                continue
+            friendly = details.get("friendly_name", model_id)
+            entry = {
+                "model_id": model_id,
+                "friendly_name": friendly,
+                "context_window": details.get("context_window", 0),
+                "output_limit": details.get("output_limit", 0),
+            }
+            existing = chosen.get(friendly)
+            if existing is None:
+                chosen[friendly] = entry
+                order.append(friendly)
+                continue
+            existing_dated = bool(_DATED_MODEL_RE.search(existing["model_id"]))
+            new_dated = bool(_DATED_MODEL_RE.search(model_id))
+            # Replace dated -> alias; ignore alias -> dated.
+            if existing_dated and not new_dated:
+                chosen[friendly] = entry
+        providers[name] = [chosen[fr] for fr in order]
+    return {"providers": providers}
+
+
+@app.get("/api/spend")
+async def get_spend() -> dict:
+    """Spend rollup: session, today, all-time, plus the configured limits."""
+    return {"totals": _spend_totals(), "limits": _spend_limits()}
 
 
 @app.delete("/api/comments/{comment_id}")
@@ -2122,6 +2682,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 "type": "doc_list",
                 "names": list_doc_names(),
                 "dirs": list_doc_dirs(),
+                "assets": list_asset_names(),
                 "active": rel_name(state.active_doc),
                 "render_target": rel_name(state.render_target),
             }
@@ -2175,4 +2736,9 @@ if __name__ == "__main__":
 
     host = os.environ.get("AGENTEX_HOST", "127.0.0.1")
     port = int(os.environ.get("AGENTEX_PORT", "8000"))
+    # Surface where the editor is rooted so the user sees instantly whether
+    # the positional arg / AGENTEX_PROJECT resolved as expected.
+    print(f"agenTeX: docs   = {DOCS}", file=sys.stderr)
+    print(f"agenTeX: state  = {AGENTEX}", file=sys.stderr)
+    print(f"agenTeX: build  = {BUILD}", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="info")
