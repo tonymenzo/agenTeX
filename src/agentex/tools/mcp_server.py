@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from orchestral.mcp import MCPServer
 
-from tools.agentex import (
+from agentex.tools.agentex import (
     add_comment,
     delete_comment,
     edit_doc,

@@ -18,12 +18,12 @@ from typing import Any
 from fastapi import HTTPException
 from orchestral import define_tool
 
-from tools.agentex import StatelessRuntimeTool
+from agentex.tools.agentex import StatelessRuntimeTool
 
 
 def _server():
     """Lazy import to avoid the circular import with server.py."""
-    import server  # noqa: WPS433
+    from agentex import server  # noqa: WPS433
     return server
 
 

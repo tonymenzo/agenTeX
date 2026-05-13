@@ -20,14 +20,7 @@ from pathlib import Path
 # the running module under both names so `import server` always returns
 # this instance regardless of launch method.
 sys.modules.setdefault("server", sys.modules[__name__])
-
-# Auto-load .env if python-dotenv is installed. We don't require dotenv as
-# a hard dependency — users can source the .env file in their shell instead.
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv(Path(__file__).parent / ".env")
-except ImportError:
-    pass
+sys.modules.setdefault("agentex.server", sys.modules[__name__])
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -39,12 +32,113 @@ log = logging.getLogger("agentex")
 
 ROOT = Path(__file__).parent
 
-# Project root. Positional CLI arg → AGENTEX_PROJECT env → ROOT/docs.
+# ----- Layered .env loading + `set`/`unset` subcommands ---------------------
+# Precedence (highest first): shell env, project/.env, ~/.config/agentex/env.
+# Snapshotting the shell env up front lets us layer the two files without
+# ever clobbering something the user already exported.
+_SHELL_ENV_KEYS = frozenset(os.environ.keys())
+_USER_ENV_PATH = (
+    Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    / "agentex"
+    / "env"
+)
+_SECRET_KEY_HINTS = ("_API_KEY", "_ACCESS_KEY", "_SECRET", "_TOKEN")
+_KEY_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _load_env_file(path: Path, *, override_user: bool = False) -> None:
+    """Pull values from a .env into os.environ.
+
+    Shell env (anything present at process start) always wins. When
+    override_user=True the file can overwrite values previously loaded
+    from the user-level file — used for project/.env so per-project
+    settings beat global defaults.
+    """
+    try:
+        from dotenv import dotenv_values  # type: ignore
+    except ImportError:
+        return
+    for k, v in dotenv_values(path).items():
+        if v is None or k in _SHELL_ENV_KEYS:
+            continue
+        if not override_user and k in os.environ:
+            continue
+        os.environ[k] = v
+
+
+def _redact(key: str, value: str) -> str:
+    if not any(h in key for h in _SECRET_KEY_HINTS) or not value:
+        return value
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def _handle_config_subcommand(cmd: str, args: list[str]) -> int:
+    try:
+        from dotenv import dotenv_values, set_key, unset_key  # type: ignore
+    except ImportError:
+        print(
+            "agenTeX: `set`/`unset` require python-dotenv.\n"
+            "  pip install python-dotenv",
+            file=sys.stderr,
+        )
+        return 2
+    _USER_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _USER_ENV_PATH.touch(exist_ok=True)
+    if cmd == "unset":
+        if len(args) != 1:
+            print("usage: server.py unset KEY", file=sys.stderr)
+            return 2
+        unset_key(str(_USER_ENV_PATH), args[0])
+        print(f"unset {args[0]} in {_USER_ENV_PATH}")
+        return 0
+    if not args:
+        values = dotenv_values(_USER_ENV_PATH)
+        print(f"# {_USER_ENV_PATH}")
+        for k, v in sorted(values.items()):
+            print(f"{k}={_redact(k, v or '')}")
+        return 0
+    if len(args) == 1 and "=" in args[0]:
+        key, _, value = args[0].partition("=")
+    elif len(args) == 2:
+        key, value = args
+    else:
+        print(
+            "usage:\n"
+            "  server.py set                # list current values (secrets redacted)\n"
+            "  server.py set KEY=value      # write a value\n"
+            "  server.py set KEY value      # same, space-separated\n"
+            "  server.py unset KEY          # remove a value",
+            file=sys.stderr,
+        )
+        return 2
+    key = key.strip()
+    if not _KEY_NAME_RE.match(key):
+        print(f"agenTeX: refusing to set {key!r} — keys must be UPPER_SNAKE_CASE",
+              file=sys.stderr)
+        return 2
+    set_key(str(_USER_ENV_PATH), key, value, quote_mode="auto")
+    print(f"set {key} in {_USER_ENV_PATH}")
+    return 0
+
+
+# Load user-level config first so AGENTEX_PROJECT can be defined there.
+_load_env_file(_USER_ENV_PATH)
+
+# `python server.py set ...` / `unset ...` operate on the user-level file
+# and exit; no server is started.
+if len(sys.argv) > 1 and sys.argv[1] in ("set", "unset"):
+    sys.exit(_handle_config_subcommand(sys.argv[1], sys.argv[2:]))
+# ---------------------------------------------------------------------------
+
+# Project root. Positional CLI arg → AGENTEX_PROJECT env → cwd/docs.
 # Used as the docs tree root that the editor surfaces, the LaTeX build
 # input, and (when explicitly supplied) the parent of .agentex / .build.
-# Default falls back to the in-repo `docs/` so the legacy single-tenant
-# setup keeps working without flags.
-_DEFAULT_DOCS = ROOT / "docs"
+# With no arg, we serve `./docs/` from whatever directory the user
+# launched from — works for the legacy clone-and-run flow (cwd = repo
+# root) and the brew-installed flow (cwd = the user's project).
+_DEFAULT_DOCS = Path.cwd() / "docs"
 
 
 def _resolve_project_path() -> Path | None:
@@ -67,6 +161,8 @@ if _custom_docs is not None:
             file=sys.stderr,
         )
         sys.exit(2)
+    # Per-project .env overrides the user-level file; shell env beats both.
+    _load_env_file(DOCS / ".env", override_user=True)
     # State + builds live INSIDE the project so multiple projects don't
     # share comments or build artifacts.
     AGENTEX = DOCS / ".agentex"
@@ -75,6 +171,8 @@ else:
     DOCS = _DEFAULT_DOCS
     AGENTEX = ROOT / ".agentex"
     BUILD = ROOT / ".build"
+    # Legacy clone-and-run setup: .env sits next to server.py.
+    _load_env_file(ROOT / ".env", override_user=True)
 
 TEMPLATES = ROOT / "templates"
 STATIC = ROOT / "static"
@@ -2457,7 +2555,7 @@ async def respond_to_comment(comment_id: str, payload: dict | None = None) -> di
     try:
         from orchestral import Agent
         from orchestral.context import Context
-        from tools.in_process_tools import AGENT_TOOLS
+        from agentex.tools.in_process_tools import AGENT_TOOLS
         client = _make_llm_client(provider, model, host)
     except (ImportError, ValueError) as e:
         raise HTTPException(503, str(e))

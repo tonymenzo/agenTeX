@@ -1,15 +1,7 @@
 {
   "mcpServers": {
     "agenTeX": {
-      "command": "/Users/ynot/code/software/miniconda3/envs/agentex/bin/python",
-      "args": [
-        "-m",
-        "tools.mcp_server"
-      ],
-      "cwd": "/Users/ynot/code/research/aTeXi",
-      "env": {
-        "PYTHONPATH": "/Users/ynot/code/research/aTeXi"
-      }
+      "command": "/Users/ynot/code/software/miniconda3/envs/agentex/bin/agentex-mcp"
     }
   }
 }

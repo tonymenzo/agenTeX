@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentex"
+version = "0.1.0"
+description = "Live LaTeX rendering interface for working alongside Claude Code"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Tony Menzo", email = "menzo.ynot@gmail.com" }]
+keywords = ["latex", "tectonic", "claude-code", "mcp", "agent"]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "watchdog>=4.0",
+    "requests>=2.31",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "orchestral-ai>=1.4",
+]
+
+[project.scripts]
+agentex = "agentex.cli:main"
+agentex-mcp = "agentex.tools.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/tonymenzo/agenTeX"
+Repository = "https://github.com/tonymenzo/agenTeX"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agentex = ["static/**/*", "templates/**/*"]
