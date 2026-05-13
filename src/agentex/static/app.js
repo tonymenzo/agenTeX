@@ -3337,10 +3337,15 @@
   // comment anchored to the selection. The popup floats over the editor
   // near the selection. Comment is created with author=user.
   let cmdkPromptEl = null;
+  let cmdkOutsideHandler = null;
   function closeCmdkPrompt() {
     if (cmdkPromptEl) {
       cmdkPromptEl.remove();
       cmdkPromptEl = null;
+    }
+    if (cmdkOutsideHandler) {
+      document.removeEventListener("mousedown", cmdkOutsideHandler, true);
+      cmdkOutsideHandler = null;
     }
   }
   async function postUserComment(anchor, message) {
@@ -3476,11 +3481,36 @@
     box.appendChild(actions);
     document.body.appendChild(box);
     cmdkPromptEl = box;
-    // Place below the cursor; if it'd overflow, place above.
-    const top = coords.bottom + 6;
-    const left = Math.min(coords.left, window.innerWidth - 380);
-    box.style.left = Math.max(8, left) + "px";
-    box.style.top = top + "px";
+    // Position relative to the cursor while keeping the popup inside the
+    // viewport. Measure post-append so the height reflects how the snippet
+    // text wrapped (width is fixed by CSS, height isn't). Prefer below the
+    // cursor; flip above when below would overflow; clamp to the closest
+    // edge if neither fits (rare — only when the popup is taller than the
+    // visible window).
+    const VIEWPORT_MARGIN = 8;
+    const popupRect = box.getBoundingClientRect();
+    const popupH = popupRect.height;
+    const popupW = popupRect.width;
+    const belowTop = coords.bottom + 6;
+    const aboveTop = coords.top - popupH - 6;
+    const fitsBelow = belowTop + popupH + VIEWPORT_MARGIN <= window.innerHeight;
+    const top = (fitsBelow || aboveTop < VIEWPORT_MARGIN)
+      ? Math.min(belowTop, window.innerHeight - popupH - VIEWPORT_MARGIN)
+      : aboveTop;
+    const left = Math.min(coords.left, window.innerWidth - popupW - VIEWPORT_MARGIN);
+    box.style.left = Math.max(VIEWPORT_MARGIN, left) + "px";
+    box.style.top = Math.max(VIEWPORT_MARGIN, top) + "px";
+    // Close on click outside. Capture phase so we intercept the press
+    // before any handler the click would have hit (e.g. focusing the
+    // editor) — feels snappier than waiting for the full click. Cmd+K
+    // opens the popup via keydown, so there's no risk of the very click
+    // that just opened it closing it again.
+    cmdkOutsideHandler = (e) => {
+      if (cmdkPromptEl && !cmdkPromptEl.contains(e.target)) {
+        closeCmdkPrompt();
+      }
+    };
+    document.addEventListener("mousedown", cmdkOutsideHandler, true);
     input.addEventListener("keydown", async (e) => {
       if (e.key === "Escape") {
         e.preventDefault();

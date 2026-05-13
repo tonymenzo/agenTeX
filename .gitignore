@@ -5,6 +5,9 @@ __pycache__/
 build/
 dist/
 docs/
+
+# Local dev helper for converting screen recordings to GIFs — never tracked.
+src/agentex/tools/mov2gif.sh
 .build/
 .agentex/
 .tectonic-cache/

@@ -2285,6 +2285,21 @@ def _find_comment(comment_id: str) -> dict | None:
     return None
 
 
+@app.get("/api/comments/{comment_id}")
+async def get_comment_by_id(comment_id: str) -> dict:
+    """Fetch a single comment by id, plus any replies to it.
+
+    Saves the agent from listing every comment in the project just to
+    address one — `list_comments` payloads on busy docs blow past tool-
+    result size limits and force a workaround search.
+    """
+    c = _find_comment(comment_id)
+    if c is None:
+        raise HTTPException(404, f"comment {comment_id} not found")
+    replies = [r for r in state.comments if r.get("parent_id") == comment_id]
+    return {"comment": c, "replies": replies}
+
+
 def _thread_root_id(comment_id: str) -> str:
     """Walk parent_id chain up to the root. Cycles are guarded by max depth."""
     current = comment_id

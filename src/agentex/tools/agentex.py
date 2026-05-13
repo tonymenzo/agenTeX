@@ -400,6 +400,32 @@ def list_comments(
 
 
 @define_tool(base=StatelessRuntimeTool)
+def get_comment(comment_id: str) -> dict[str, Any]:
+    """Fetch a single comment by id, plus any replies to it.
+
+    Use this when the user references a specific comment ("address c0084")
+    instead of dumping every comment with `list_comments` and searching the
+    result — `list_comments` payloads on busy docs can exceed tool-result
+    size limits.
+
+    Args:
+        comment_id: The `id` field, like "c0084".
+
+    Returns:
+        On success: {"comment": {...}, "replies": [{...}, ...]}
+            `comment` is the full record (id, doc, message, author, ts,
+            resolved, orphaned, parent_id, kind, anchor fields).
+            `replies` is the comments whose `parent_id` matches.
+        On failure: {"ok": False, "status": int, "error": str}
+            status 404 -> no comment with that id.
+    """
+    r = requests.get(f"{AGENTEX_BASE}/api/comments/{comment_id}", timeout=10)
+    if not r.ok:
+        return {"ok": False, "status": r.status_code, "error": r.text[:500]}
+    return r.json()
+
+
+@define_tool(base=StatelessRuntimeTool)
 def resolve_comment(comment_id: str, resolved: bool = True) -> dict[str, Any]:
     """Mark a comment resolved (hidden from the default sidebar view) or
     re-open it. Use this when the user's reply or your follow-up edit has
