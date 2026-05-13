@@ -68,7 +68,10 @@
     </header>
     <main class="layout">
       <aside id="sidebar" class="sidebar collapsed" aria-label="Files">
-        <div class="sidebar-header">Files</div>
+        <div class="sidebar-header">
+          <span>Files</span>
+          <button id="filter-renderable" class="sidebar-header-toggle" type="button" aria-pressed="false" title="Toggle: show all editable files vs. just the ones agentex previews (.tex, .md)">All</button>
+        </div>
         <ul id="file-list" class="file-list"></ul>
         <div class="sidebar-actions">
           <button id="new-doc" class="sidebar-btn" type="button">+ New document</button>

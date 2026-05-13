@@ -132,47 +132,66 @@ if len(sys.argv) > 1 and sys.argv[1] in ("set", "unset"):
     sys.exit(_handle_config_subcommand(sys.argv[1], sys.argv[2:]))
 # ---------------------------------------------------------------------------
 
-# Project root. Positional CLI arg → AGENTEX_PROJECT env → cwd/docs.
-# Used as the docs tree root that the editor surfaces, the LaTeX build
-# input, and (when explicitly supplied) the parent of .agentex / .build.
-# With no arg, we serve `./docs/` from whatever directory the user
-# launched from — works for the legacy clone-and-run flow (cwd = repo
-# root) and the brew-installed flow (cwd = the user's project).
-_DEFAULT_DOCS = Path.cwd() / "docs"
+# Project root. Positional CLI arg → AGENTEX_PROJECT env → cwd. Used as
+# the docs tree root that the editor surfaces, the LaTeX build input, and
+# the parent of .agentex / .build. Treating cwd as the project (rather
+# than cwd/docs) matches git/npm/cargo: agentex serves whatever directory
+# you're in. A deny-list below refuses obvious foot-guns like ~ or /.
 
 
-def _resolve_project_path() -> Path | None:
+def _resolve_project_path() -> Path:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if args:
         return Path(args[0]).expanduser()
     env = os.environ.get("AGENTEX_PROJECT") or os.environ.get("AGENTEX_DOCS")
     if env:
         return Path(env).expanduser()
-    return None
+    return Path.cwd()
 
 
-_custom_docs = _resolve_project_path()
-if _custom_docs is not None:
-    DOCS = _custom_docs.resolve()
-    if not DOCS.is_dir():
-        print(
-            f"agenTeX: project path is not a directory: {DOCS}\n"
-            f"  pass an existing dir as the first arg or via AGENTEX_PROJECT.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    # Per-project .env overrides the user-level file; shell env beats both.
-    _load_env_file(DOCS / ".env", override_user=True)
-    # State + builds live INSIDE the project so multiple projects don't
-    # share comments or build artifacts.
-    AGENTEX = DOCS / ".agentex"
-    BUILD = DOCS / ".build"
-else:
-    DOCS = _DEFAULT_DOCS
-    AGENTEX = ROOT / ".agentex"
-    BUILD = ROOT / ".build"
-    # Legacy clone-and-run setup: .env sits next to server.py.
-    _load_env_file(ROOT / ".env", override_user=True)
+def _refuse_if_too_wide(path: Path) -> None:
+    """Bail when the project root is somewhere we shouldn't index in bulk.
+
+    Walking ~ or / would trigger a recursive watchdog scan over thousands
+    of files and drop .agentex/ + .build/ in the wrong place. We refuse
+    the obvious cases (filesystem root, $HOME, top-level system dirs like
+    /Users, /opt, /var) and tell the user to cd into a real project dir.
+    """
+    reason: str | None = None
+    if str(path) == path.anchor:
+        reason = "the filesystem root"
+    elif path == Path.home():
+        reason = "your home directory"
+    elif path.parent == Path(path.anchor):
+        # Top-level dirs: /Users, /opt, /var, /tmp, /private, /usr, /home, ...
+        reason = f"a top-level system directory ({path})"
+    if reason is None:
+        return
+    print(
+        f"agenTeX: refusing to run on {reason}.\n"
+        f"  Walking it would index every nested file and drop .agentex/\n"
+        f"  and .build/ in the wrong place. cd into a project directory\n"
+        f"  first, or pass one explicitly:  agentex /path/to/project",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+DOCS = _resolve_project_path().resolve()
+if not DOCS.is_dir():
+    print(
+        f"agenTeX: project path is not a directory: {DOCS}\n"
+        f"  pass an existing dir as the first arg or via AGENTEX_PROJECT.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+_refuse_if_too_wide(DOCS)
+# Per-project .env overrides the user-level file; shell env beats both.
+_load_env_file(DOCS / ".env", override_user=True)
+# State + builds live INSIDE the project so multiple projects don't
+# share comments or build artifacts.
+AGENTEX = DOCS / ".agentex"
+BUILD = DOCS / ".build"
 
 TEMPLATES = ROOT / "templates"
 STATIC = ROOT / "static"
@@ -185,19 +204,26 @@ COMMENT_CONTEXT_CHARS = 40  # chars of prefix/suffix stored for reanchoring
 DEFAULT_DOC_NAME = "current.tex"
 RENDER_DEBOUNCE = 0.4
 # A relative path under DOCS made of slash-separated segments. Each segment
-# matches [A-Za-z0-9._-]+; the final segment must end in one of the allowed
-# suffixes. ".." segments are rejected by _check_segments below.
-DOC_NAME_RE = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.(tex|bib|md|txt)$")
+# matches [A-Za-z0-9._-]+ — no spaces, no special chars. The suffix check is
+# separate (against TEXT_SUFFIXES) so it can be expanded without touching
+# the path regex. ".." segments are rejected by _check_segments below.
+from agentex._suffixes import RENDERABLE_SUFFIXES, TEXT_SUFFIXES
+
+_DOC_PATH_RE = re.compile(r"^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$")
 DIR_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
-DOC_GLOBS = ("**/*.tex", "**/*.bib", "**/*.md", "**/*.txt")
-# Non-editable but show-in-tree assets. PDFs, raster + vector images.
-# Surfaced grayed-out so the user sees their figs/ directory contents
-# without being able to click-to-edit them.
-ASSET_GLOBS = (
-    "**/*.pdf", "**/*.png", "**/*.jpg", "**/*.jpeg",
-    "**/*.svg", "**/*.eps", "**/*.gif", "**/*.webp",
-)
-RENDERABLE_SUFFIXES = (".tex", ".md")
+# Fast lookup sets used by the project-listing walk. Suffix membership is
+# checked once per file during traversal; keep them frozen for clarity.
+_TEXT_SUFFIX_SET = frozenset(s.lower() for s in TEXT_SUFFIXES)
+_ASSET_SUFFIX_SET = frozenset((
+    ".pdf", ".png", ".jpg", ".jpeg", ".svg", ".eps", ".gif", ".webp",
+))
+# Directory names pruned in addition to anything starting with ".". These
+# never contain user-editable content but ARE common in real projects;
+# walking into them is the dominant unnecessary cost on a deep tree.
+_IGNORE_DIR_NAMES = frozenset((
+    "build", "dist", "node_modules", "__pycache__",
+    "venv", "env",  # ".X" forms already pruned by the leading-dot check
+))
 
 
 def _check_segments(name: str) -> bool:
@@ -206,60 +232,106 @@ def _check_segments(name: str) -> bool:
     return all(seg not in (".", "..") for seg in name.split("/"))
 
 
-def _is_hidden_rel(rel: Path) -> bool:
-    """True if any path segment starts with '.' — skips .agentex / .build /
-    .git / etc. when the project root contains them (custom-path case)."""
-    return any(part.startswith(".") for part in rel.parts)
+def is_valid_doc_name(name: str) -> bool:
+    """A path under DOCS pointing at an editable text file. Combines the
+    path-shape regex, the no-`..` check, and the suffix allowlist into one
+    helper used at every input boundary (create, rename, watcher filter)."""
+    if not _DOC_PATH_RE.match(name) or not _check_segments(name):
+        return False
+    return Path(name).suffix.lower() in _TEXT_SUFFIX_SET
+
+
+# ---- Project listing -------------------------------------------------------
+# Three list_*() helpers share one tree walk, cached until a file event
+# invalidates it. Without the cache, every UI action that calls
+# broadcast_doc_list (file switch, save, render, reconnect) would re-walk
+# the project — fine when DOCS = ./docs/ with a handful of files,
+# unacceptable now that DOCS = cwd with thousands.
+
+_listing_cache: tuple[list[str], list[str], list[str]] | None = None
+
+
+def _is_pruneable_dir(name: str) -> bool:
+    """True for any directory we shouldn't descend into during the walk:
+    hidden dirs (.git, .agentex, .build, ...), well-known build / cache
+    dirs (build/, dist/, node_modules/, ...), and Python egg-info packages."""
+    if name.startswith("."):
+        return True
+    if name in _IGNORE_DIR_NAMES:
+        return True
+    if name.endswith(".egg-info"):
+        return True
+    return False
+
+
+def _compute_project_listing() -> tuple[list[str], list[str], list[str]]:
+    """One pass over the project tree producing (docs, dirs, assets).
+    Directories are pruned in-place during os.walk so we never descend
+    into .git/, node_modules/, etc. — that pruning is the dominant
+    speed-up vs. globbing the tree N times."""
+    docs_root = DOCS.resolve()
+    docs_root_str = str(docs_root)
+    docs: list[str] = []
+    dirs: list[str] = []
+    assets: list[str] = []
+
+    def _on_error(err: OSError) -> None:
+        log.debug("walk error: %s", err)
+
+    for root, sub_dirs, files in os.walk(
+        docs_root_str, followlinks=False, onerror=_on_error
+    ):
+        # Prune in-place — os.walk respects mutation.
+        sub_dirs[:] = [d for d in sub_dirs if not _is_pruneable_dir(d)]
+        if root == docs_root_str:
+            rel_prefix = ""
+        else:
+            # os.walk yields absolute roots; convert by string slicing to
+            # avoid the cost of Path() construction per directory.
+            rel_root = root[len(docs_root_str) + 1:].replace(os.sep, "/")
+            dirs.append(rel_root)
+            rel_prefix = rel_root + "/"
+        for fname in files:
+            if fname.startswith("."):
+                continue
+            dot = fname.rfind(".")
+            if dot == -1:
+                continue
+            suffix = fname[dot:].lower()
+            if suffix in _TEXT_SUFFIX_SET:
+                docs.append(rel_prefix + fname)
+            elif suffix in _ASSET_SUFFIX_SET:
+                assets.append(rel_prefix + fname)
+    docs.sort()
+    dirs.sort()
+    assets.sort()
+    return docs, dirs, assets
+
+
+def _get_project_listing() -> tuple[list[str], list[str], list[str]]:
+    global _listing_cache
+    if _listing_cache is None:
+        _listing_cache = _compute_project_listing()
+    return _listing_cache
+
+
+def invalidate_project_listing() -> None:
+    """Drop the cached listing. Called from the file watcher when anything
+    under DOCS appears, disappears, or gets renamed."""
+    global _listing_cache
+    _listing_cache = None
 
 
 def list_doc_names() -> list[str]:
-    names: set[str] = set()
-    docs_resolved = DOCS.resolve()
-    for pattern in DOC_GLOBS:
-        for p in DOCS.glob(pattern):
-            try:
-                rel = p.resolve().relative_to(docs_resolved)
-            except ValueError:
-                continue
-            if _is_hidden_rel(rel):
-                continue
-            names.add(rel.as_posix())
-    return sorted(names)
-
-
-def list_asset_names() -> list[str]:
-    """Non-editable files (figures, PDFs) visible in the tree. Same hidden-
-    dir filter as docs so build artifacts under .build/ don't leak in."""
-    names: set[str] = set()
-    docs_resolved = DOCS.resolve()
-    for pattern in ASSET_GLOBS:
-        for p in DOCS.glob(pattern):
-            try:
-                rel = p.resolve().relative_to(docs_resolved)
-            except ValueError:
-                continue
-            if _is_hidden_rel(rel):
-                continue
-            names.add(rel.as_posix())
-    return sorted(names)
+    return _get_project_listing()[0]
 
 
 def list_doc_dirs() -> list[str]:
-    """Every subdirectory of DOCS, as forward-slash relative paths. Empty
-    string (DOCS itself) is excluded — the frontend treats it as the root."""
-    out: list[str] = []
-    docs_resolved = DOCS.resolve()
-    for p in DOCS.rglob("*"):
-        if not p.is_dir():
-            continue
-        try:
-            rel = p.resolve().relative_to(docs_resolved)
-        except ValueError:
-            continue
-        if _is_hidden_rel(rel):
-            continue
-        out.append(rel.as_posix())
-    return sorted(out)
+    return _get_project_listing()[1]
+
+
+def list_asset_names() -> list[str]:
+    return _get_project_listing()[2]
 
 
 def rel_name(p: Path) -> str:
@@ -272,7 +344,7 @@ def rel_name(p: Path) -> str:
 
 
 def doc_path(name: str) -> Path:
-    if not DOC_NAME_RE.match(name) or not _check_segments(name):
+    if not is_valid_doc_name(name):
         raise HTTPException(400, "invalid doc name")
     p = (DOCS / name).resolve()
     try:
@@ -396,6 +468,7 @@ class DocWatcher(FileSystemEventHandler):
             return
         # Directory events (create/delete a subfolder) always refresh the list.
         if event.is_directory:
+            invalidate_project_listing()
             asyncio.run_coroutine_threadsafe(broadcast_doc_list(), state.loop)
             return
         # For file events, only refresh if the path (relative to DOCS) would
@@ -405,7 +478,10 @@ class DocWatcher(FileSystemEventHandler):
             rel = Path(event.src_path).resolve().relative_to(DOCS.resolve()).as_posix()
         except ValueError:
             return
-        if not DOC_NAME_RE.match(rel) or not _check_segments(rel):
+        # Always invalidate so the next listing reflects reality (cheap);
+        # only re-broadcast if the changed file is one the editor surfaces.
+        invalidate_project_listing()
+        if not is_valid_doc_name(rel):
             return
         asyncio.run_coroutine_threadsafe(broadcast_doc_list(), state.loop)
 

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Steer agent edits on agentex/docs/*.{tex,bib,md} toward the MCP tools.
+"""Steer agent edits on agentex-managed files toward the MCP tools.
 
-Blocks native Edit/Write/MultiEdit when the target is a managed doc
-under docs/, with a message redirecting the agent to
-mcp__agenTeX__EditDoc or mcp__agenTeX__StreamEdit. Native
-tools write to disk but don't broadcast, so the user's browser editor
-would silently fall out of sync.
+Blocks native Edit/Write/MultiEdit when the target is a text file under
+docs/, with a message redirecting the agent to mcp__agenTeX__EditDoc or
+mcp__agenTeX__StreamEdit. Native tools write to disk but don't broadcast,
+so the user's browser editor would silently fall out of sync.
+
+The allowlist below mirrors src/agentex/_suffixes.py — keep them in sync.
+Duplicated rather than imported because this hook runs under whatever
+`python3` is on PATH, which isn't necessarily the env with agentex
+installed.
 
 To disable: remove this hook's entry from .claude/settings.json.
 """
@@ -17,6 +21,24 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = (PROJECT_ROOT / "docs").resolve()
+
+# Keep in sync with src/agentex/_suffixes.py:TEXT_SUFFIXES.
+TEXT_SUFFIXES = frozenset((
+    ".tex", ".bib", ".cls", ".sty", ".bbx", ".cbx",
+    ".md", ".rst", ".txt", ".org",
+    ".py", ".pyi", ".pyx", ".r", ".jl", ".m",
+    ".sh", ".bash", ".zsh", ".fish",
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp",
+    ".rs", ".go",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".vue", ".svelte",
+    ".java", ".kt", ".scala", ".swift",
+    ".rb", ".pl", ".lua", ".sql", ".dart", ".elm", ".ex", ".exs", ".clj",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".xml", ".csv", ".tsv", ".log",
+    ".dockerfile", ".gitignore", ".dockerignore",
+))
 
 
 def main() -> int:
@@ -43,7 +65,7 @@ def main() -> int:
         resolved.relative_to(DOCS_DIR)
     except ValueError:
         return 0
-    if resolved.suffix not in (".tex", ".bib", ".md"):
+    if resolved.suffix.lower() not in TEXT_SUFFIXES:
         return 0
 
     msg = (

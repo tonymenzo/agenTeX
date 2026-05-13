@@ -22,6 +22,7 @@
   const fileListEl = $("file-list");
   const newDocBtn = $("new-doc");
   const newFolderBtn = $("new-folder");
+  const filterRenderableEl = $("filter-renderable");
 
   const STORAGE_PREFIX = "agentex:";
   const lsGet = (k, fallback) => {
@@ -39,9 +40,29 @@
   let allDirs = [];
   let allAssets = [];
   let expandedFolders = new Set(lsGet("expandedFolders", []));
+  // When true, hide everything except files agentex can preview to a PDF /
+  // HTML pane (.tex, .md). Other text files (.py, .sh, .json, ...) are still
+  // editable from the API; the toggle just declutters the tree.
+  let renderableOnly = lsGet("renderableOnly", false);
+  const RENDERABLE_SUFFIXES_JS = [".tex", ".md"];
 
   function saveExpanded() {
     lsSet("expandedFolders", Array.from(expandedFolders));
+  }
+
+  function updateFilterToggleUI() {
+    if (!filterRenderableEl) return;
+    filterRenderableEl.textContent = renderableOnly ? ".tex/.md" : "All";
+    filterRenderableEl.setAttribute("aria-pressed", renderableOnly ? "true" : "false");
+  }
+  if (filterRenderableEl) {
+    updateFilterToggleUI();
+    filterRenderableEl.addEventListener("click", () => {
+      renderableOnly = !renderableOnly;
+      lsSet("renderableOnly", renderableOnly);
+      updateFilterToggleUI();
+      renderFileList();
+    });
   }
 
   function ensureAncestorsExpanded(path) {
@@ -1252,9 +1273,60 @@
   let visualScale = 1.0;
   let lastPaneWidth = 0;
 
+  // Rendered-canvas cache, keyed by the /api/pdf?h=<hash> URL. Switching
+  // between an .md and a .tex preview otherwise re-fetches and re-parses
+  // the PDF and re-rasterizes every page (the expensive bit) — round
+  // trips a user can feel. Capped low because each canvas holds a backing
+  // bitmap of a few MB. URL changes on every re-render (hash in query) so
+  // stale entries can't masquerade as fresh.
+  const _pdfCanvasCache = new Map();
+  const PDF_CACHE_MAX = 4;
+  function _stashCurrentPdfScroll() {
+    if (currentPdfUrl == null) return;
+    const entry = _pdfCanvasCache.get(currentPdfUrl);
+    if (!entry) return;
+    const sh = previewEl.scrollHeight;
+    entry.scroll = sh > 0
+      ? { ratio: previewEl.scrollTop / sh, offset: 0 }
+      : { ratio: 0, offset: 0 };
+  }
+  function _evictOldestPdfsIfNeeded() {
+    while (_pdfCanvasCache.size > PDF_CACHE_MAX) {
+      const oldest = _pdfCanvasCache.keys().next().value;
+      _pdfCanvasCache.delete(oldest);
+    }
+  }
+
   async function renderPdf(url, anchor) {
     if (!window.pdfjsLib) {
       previewEl.textContent = "PDF.js failed to load";
+      return;
+    }
+    const paneW = previewEl.clientWidth || 600;
+    // Cache hit: reattach the previously-rendered canvases. Skips the
+    // network fetch, the PDF parse, AND the per-page rasterize. Only valid
+    // when the pane width hasn't changed — different width means a new
+    // pdfScale, which means stale bitmaps.
+    const cached = _pdfCanvasCache.get(url);
+    if (cached && cached.paneW === paneW) {
+      const myToken = ++renderToken;
+      previewEl.classList.remove("md");
+      previewEl.classList.add("pdf");
+      currentPdfUrl = url;
+      downloadBtn.disabled = false;
+      pdfScale = cached.pdfScale;
+      visualScale = 1.0;
+      lastPaneWidth = paneW;
+      previewEl.replaceChildren(...cached.canvases);
+      // LRU touch — re-insert moves it to the end of Map's iteration order.
+      _pdfCanvasCache.delete(url);
+      _pdfCanvasCache.set(url, cached);
+      const a = anchor || cached.scroll || { ratio: 0, offset: 0 };
+      const sh = previewEl.scrollHeight;
+      const target = a.ratio * sh - a.offset;
+      const maxScroll = Math.max(0, sh - previewEl.clientHeight);
+      previewEl.scrollTop = Math.max(0, Math.min(target, maxScroll));
+      if (myToken !== renderToken) return;
       return;
     }
     previewEl.classList.remove("md");
@@ -1320,12 +1392,23 @@
       })())
     );
     if (myToken !== renderToken) return;
-    previewEl.replaceChildren(...canvases.filter(Boolean));
+    const finalCanvases = canvases.filter(Boolean);
+    previewEl.replaceChildren(...finalCanvases);
     visualScale = 1.0;
     const newScrollHeight = previewEl.scrollHeight;
     const target = anchor.ratio * newScrollHeight - anchor.offset;
     const maxScroll = Math.max(0, newScrollHeight - previewEl.clientHeight);
     previewEl.scrollTop = Math.max(0, Math.min(target, maxScroll));
+    // Stash for the next switch-back. The URL encodes a content hash, so
+    // a re-render after Cmd+S produces a new URL and a fresh entry; the
+    // old one ages out via the LRU cap.
+    _pdfCanvasCache.set(url, {
+      canvases: finalCanvases,
+      paneW,
+      pdfScale,
+      scroll: null,
+    });
+    _evictOldestPdfsIfNeeded();
   }
 
   function applyVisualScale() {
@@ -1337,6 +1420,9 @@
   }
 
   function renderMarkdown(text) {
+    // Save the PDF's last scroll so a switch back to the same .tex
+    // restores where the user was reading.
+    _stashCurrentPdfScroll();
     ++renderToken;
     currentPdfUrl = null;
     downloadBtn.disabled = true;
@@ -1642,6 +1728,139 @@
     return parts.length > 1 ? parts.slice(-2).join("/") : base;
   }
 
+  // ---- Tab drag-and-drop reordering -------------------------------------
+  // Native HTML5 DnD. Tabs are draggable buttons; the container delegates
+  // dragover/drop. A thin vertical bar is inserted between the existing
+  // tabs to show where the drop will land; on drop we splice openTabs and
+  // animate every moved tab from its old position to its new one (FLIP).
+  let _draggingTabName = null;
+  let _dropBeforeName = null;
+  let _dropIndicator = null;
+
+  function _ensureDropIndicator() {
+    if (_dropIndicator) return _dropIndicator;
+    _dropIndicator = document.createElement("div");
+    _dropIndicator.className = "tab-drop-indicator";
+    _dropIndicator.setAttribute("aria-hidden", "true");
+    return _dropIndicator;
+  }
+  function _clearDropIndicator() {
+    if (_dropIndicator && _dropIndicator.parentNode) {
+      _dropIndicator.parentNode.removeChild(_dropIndicator);
+    }
+    _dropBeforeName = null;
+  }
+  function _onTabDragStart(e, name) {
+    // Grabbing the × shouldn't initiate a drag — the close click still works.
+    if (e.target && (e.target.classList?.contains("close")
+        || e.target.closest?.(".close"))) {
+      e.preventDefault();
+      return;
+    }
+    _draggingTabName = name;
+    try {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", name);
+    } catch {}
+    // Defer the .dragging class so the browser captures its drag image
+    // BEFORE the source goes transparent.
+    setTimeout(() => {
+      const el = tabsEl.querySelector(`.tab[data-name="${CSS.escape(name)}"]`);
+      if (el) el.classList.add("dragging");
+    }, 0);
+  }
+  function _onTabDragEnd() {
+    for (const el of tabsEl.querySelectorAll(".tab.dragging")) {
+      el.classList.remove("dragging");
+    }
+    _clearDropIndicator();
+    _draggingTabName = null;
+  }
+  function _onTabsDragOver(e) {
+    if (!_draggingTabName) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "move"; } catch {}
+    const tabs = Array.from(tabsEl.querySelectorAll(".tab:not(.dragging)"));
+    const x = e.clientX;
+    let beforeName = null;
+    for (const t of tabs) {
+      const rect = t.getBoundingClientRect();
+      if (x < rect.left + rect.width / 2) {
+        beforeName = t.dataset.name;
+        break;
+      }
+    }
+    if (beforeName === _dropBeforeName
+        && _dropIndicator && _dropIndicator.parentNode === tabsEl) return;
+    _dropBeforeName = beforeName;
+    const indicator = _ensureDropIndicator();
+    if (beforeName) {
+      const target = tabsEl.querySelector(`.tab[data-name="${CSS.escape(beforeName)}"]`);
+      if (target) tabsEl.insertBefore(indicator, target);
+    } else {
+      tabsEl.appendChild(indicator);
+    }
+  }
+  function _onTabsDragLeave(e) {
+    // dragleave fires when crossing into children; only clear when truly leaving.
+    if (e.relatedTarget && tabsEl.contains(e.relatedTarget)) return;
+    _clearDropIndicator();
+  }
+  function _onTabsDrop(e) {
+    if (!_draggingTabName) return;
+    e.preventDefault();
+    const src = _draggingTabName;
+    const before = _dropBeforeName;
+    _clearDropIndicator();
+
+    // Snapshot pre-mutation positions so we can FLIP-animate the slide.
+    const beforeRects = new Map();
+    for (const t of tabsEl.querySelectorAll(".tab")) {
+      beforeRects.set(t.dataset.name, t.getBoundingClientRect().left);
+    }
+
+    const visible = openTabs.filter((n) => allDocs.includes(n));
+    const hidden = openTabs.filter((n) => !allDocs.includes(n));
+    const withoutSrc = visible.filter((n) => n !== src);
+    let newVisible;
+    if (before == null) {
+      newVisible = [...withoutSrc, src];
+    } else {
+      const idx = withoutSrc.indexOf(before);
+      newVisible = idx < 0
+        ? [...withoutSrc, src]
+        : [...withoutSrc.slice(0, idx), src, ...withoutSrc.slice(idx)];
+    }
+    if (newVisible.join("|") === visible.join("|")) return;
+    openTabs = [...newVisible, ...hidden];
+    lsSet("openTabs", openTabs);
+    renderTabs();
+
+    // FLIP: translate each moved tab from its old position back to where
+    // it WAS, then RAF removes the transform with a transition so it
+    // slides forward to its new home.
+    for (const t of tabsEl.querySelectorAll(".tab")) {
+      const oldLeft = beforeRects.get(t.dataset.name);
+      if (oldLeft == null) continue;
+      const newLeft = t.getBoundingClientRect().left;
+      const dx = oldLeft - newLeft;
+      if (Math.abs(dx) < 0.5) continue;
+      t.style.transition = "none";
+      t.style.transform = `translateX(${dx}px)`;
+      requestAnimationFrame(() => {
+        t.style.transition = "transform 160ms cubic-bezier(0.2, 0, 0, 1)";
+        t.style.transform = "";
+      });
+      setTimeout(() => {
+        t.style.transition = "";
+        t.style.transform = "";
+      }, 220);
+    }
+  }
+  tabsEl.addEventListener("dragover", _onTabsDragOver);
+  tabsEl.addEventListener("dragleave", _onTabsDragLeave);
+  tabsEl.addEventListener("drop", _onTabsDrop);
+
   function renderTabs() {
     const visible = openTabs.filter((n) => allDocs.includes(n));
     tabsEl.replaceChildren(
@@ -1651,6 +1870,10 @@
         el.type = "button";
         el.role = "tab";
         el.title = name;
+        el.dataset.name = name;
+        el.draggable = true;
+        el.addEventListener("dragstart", (e) => _onTabDragStart(e, name));
+        el.addEventListener("dragend", _onTabDragEnd);
         const label = document.createElement("span");
         label.textContent = tabLabel(name, visible);
         el.appendChild(label);
@@ -1796,7 +2019,29 @@
   }
 
   function renderFileList() {
-    const tree = buildTree(allDocs, allDirs, allAssets);
+    let docs = allDocs;
+    let dirs = allDirs;
+    let assets = allAssets;
+    if (renderableOnly) {
+      docs = docs.filter((d) => {
+        const s = d.toLowerCase();
+        return RENDERABLE_SUFFIXES_JS.some((suf) => s.endsWith(suf));
+      });
+      // Hide any folder that no longer contains a renderable descendant.
+      const needed = new Set();
+      for (const d of docs) {
+        const parts = d.split("/");
+        parts.pop();
+        let acc = "";
+        for (const p of parts) {
+          acc = acc ? acc + "/" + p : p;
+          needed.add(acc);
+        }
+      }
+      dirs = dirs.filter((d) => needed.has(d));
+      assets = [];
+    }
+    const tree = buildTree(docs, dirs, assets);
     fileListEl.replaceChildren(
       ...tree.children.map((c) =>
         c.type === "dir" ? renderFolderNode(c)

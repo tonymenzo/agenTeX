@@ -100,10 +100,23 @@ body {
   color: var(--text-dim);
   border: 1px solid transparent;
   border-radius: 4px;
-  cursor: pointer;
+  cursor: grab;
+  user-select: none;
   white-space: nowrap;
   background: transparent;
   transition: color 0.1s ease, background 0.1s ease, border-color 0.1s ease;
+}
+.tab:active { cursor: grabbing; }
+.tab.dragging { opacity: 0.4; }
+.tab .close { cursor: pointer; }
+.tab-drop-indicator {
+  flex: 0 0 auto;
+  width: 2px;
+  align-self: stretch;
+  margin: 4px 0;
+  background: var(--accent, #6ea8fe);
+  border-radius: 1px;
+  pointer-events: none;
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); background: var(--bg-elev); border-color: var(--border); }
@@ -621,6 +634,26 @@ body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sidebar-header-toggle {
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.sidebar-header-toggle:hover { color: var(--text); border-color: #2a2e36; }
+.sidebar-header-toggle[aria-pressed="true"] {
+  color: var(--text);
+  border-color: #2a2e36;
 }
 
 .file-list {
