@@ -1035,6 +1035,11 @@ async def lifespan(app: FastAPI):
     )
     state.daemon_task = asyncio.create_task(render_daemon())
     schedule_render()
+    # Pre-warm the LLM model catalog in a background thread. Importing
+    # orchestral.llm.anthropic.model_details cold takes ~7s (it transitively
+    # loads the Anthropic SDK); doing this lazily inside the GET handler
+    # blocks the event loop and freezes every concurrent WebSocket message.
+    asyncio.create_task(asyncio.to_thread(_prewarm_model_catalog))
     try:
         yield
     finally:
@@ -1638,6 +1643,123 @@ async def post_timeline_enabled(payload: dict) -> dict:
     state.timeline_enabled = enabled
     save_timeline_pref(enabled)
     return {"enabled": enabled}
+
+
+def _recompute_last_snapshot_hashes(lines: list[str]) -> dict[str, str]:
+    """Rebuild the per-doc latest-hash map from the on-disk timeline order
+    (oldest first). Used after deletes so the dedup gate doesn't think the
+    most recent snapshot still exists."""
+    latest: dict[str, str] = {}
+    for line in lines:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        doc = entry.get("doc")
+        h = entry.get("hash")
+        if isinstance(doc, str) and isinstance(h, str):
+            latest[doc] = h
+    return latest
+
+
+@app.post("/api/timeline/entry/delete")
+async def post_timeline_delete_entry(payload: dict) -> dict:
+    """Remove a single timeline entry, identified by (ts, hash). Garbage-
+    collects the underlying snapshot file iff no remaining entry references
+    that hash — same content snapshotted twice shares one file."""
+    ts = payload.get("ts")
+    h = payload.get("hash")
+    if not isinstance(ts, str) or not isinstance(h, str):
+        raise HTTPException(400, "ts and hash required")
+    if not _HASH_RE.match(h):
+        raise HTTPException(400, "invalid hash")
+    if not TIMELINE_LOG.exists():
+        raise HTTPException(404, "entry not found")
+    try:
+        with TIMELINE_LOG.open("r", encoding="utf-8") as f:
+            raw = f.readlines()
+    except OSError as e:
+        raise HTTPException(500, f"timeline read failed: {e}")
+    kept: list[str] = []
+    removed = 0
+    referenced_hashes: set[str] = set()
+    for line in raw:
+        stripped = line.rstrip("\n")
+        if not stripped:
+            continue
+        try:
+            entry = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept.append(stripped)
+            continue
+        if removed == 0 and entry.get("ts") == ts and entry.get("hash") == h:
+            removed += 1
+            continue
+        kept.append(stripped)
+        eh = entry.get("hash")
+        if isinstance(eh, str):
+            referenced_hashes.add(eh)
+    if removed == 0:
+        raise HTTPException(404, "entry not found")
+    tmp = TIMELINE_LOG.with_suffix(".jsonl.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            for line in kept:
+                f.write(line + "\n")
+        tmp.replace(TIMELINE_LOG)
+    except OSError as e:
+        raise HTTPException(500, f"timeline write failed: {e}")
+    snapshot_removed = False
+    if h not in referenced_hashes:
+        snap = SNAPSHOTS / f"{h}.txt"
+        try:
+            snap.unlink()
+            snapshot_removed = True
+        except FileNotFoundError:
+            snapshot_removed = True  # already gone, treat as success
+        except OSError:
+            pass
+    # Rebuild the dedup map so the next render after this delete actually
+    # writes a new snapshot if it would otherwise have matched the just-
+    # removed latest entry.
+    state.last_snapshot_hash = _recompute_last_snapshot_hashes(kept)
+    return {"ok": True, "removed": removed, "snapshot_removed": snapshot_removed}
+
+
+@app.post("/api/timeline/clear")
+async def post_timeline_clear() -> dict:
+    """Wipe the entire history: timeline.jsonl + every snapshot file. The
+    `recording` toggle is preserved — if it was on, the next render starts
+    a fresh history. Clears the in-memory dedup map so the next snapshot
+    isn't skipped against a now-deleted hash."""
+    entries_removed = 0
+    if TIMELINE_LOG.exists():
+        try:
+            with TIMELINE_LOG.open("r", encoding="utf-8") as f:
+                entries_removed = sum(1 for line in f if line.strip())
+        except OSError:
+            pass
+        try:
+            TIMELINE_LOG.unlink()
+        except OSError:
+            pass
+    snapshots_removed = 0
+    if SNAPSHOTS.exists():
+        for snap in SNAPSHOTS.glob("*.txt"):
+            try:
+                snap.unlink()
+                snapshots_removed += 1
+            except OSError:
+                pass
+    state.last_snapshot_hash.clear()
+    return {
+        "ok": True,
+        "entries_removed": entries_removed,
+        "snapshots_removed": snapshots_removed,
+    }
 
 
 @app.get("/api/synctex/inverse")
@@ -2603,20 +2725,29 @@ _RETIRED_MODELS: set[tuple[str, str]] = {
 }
 
 
-@app.get("/api/config/models")
-async def get_available_models() -> dict:
-    """Catalog of provider + model entries for the frontend picker.
+_MODEL_CATALOG_CACHE: dict | None = None
+_MODEL_CATALOG_LOCK = asyncio.Lock()
 
-    Only loads catalogs for providers that have keys configured — bypasses
-    orchestral.llm.get_available_models() which force-imports every SDK
-    for ~7s on first call. Per-provider model_details is millisecond-cheap.
 
-    Dedup rule: when two model_ids share a friendly_name (e.g.
-    `claude-sonnet-4-5` and `claude-sonnet-4-5-20250929` both surface as
-    "Claude Sonnet 4.5"), prefer the alias (no -YYYYMMDD suffix). The
-    alias auto-tracks the current stable and is what `AGENTEX_API_MODEL`
-    defaults expect.
-    """
+def _prewarm_model_catalog() -> None:
+    """Populate _MODEL_CATALOG_CACHE on a worker thread. Safe to call once
+    at startup; idempotent — later calls find the cache and return."""
+    global _MODEL_CATALOG_CACHE
+    if _MODEL_CATALOG_CACHE is not None:
+        return
+    try:
+        catalog = _build_model_catalog()
+    except Exception:
+        log.exception("model catalog pre-warm failed")
+        return
+    _MODEL_CATALOG_CACHE = catalog
+
+
+def _build_model_catalog() -> dict:
+    """Sync builder for the model catalog. Imports orchestral.llm.<name>.model_details
+    for each configured provider — Anthropic's costs ~7s, Bedrock ~2s, so this
+    must NOT run inline in an async handler or it stalls the event loop (and
+    every WebSocket message with it). Callers should wrap in asyncio.to_thread."""
     providers: dict[str, list] = {}
     for name in _LLM_PROVIDERS:
         if not _api_key_present(name):
@@ -2628,7 +2759,6 @@ async def get_available_models() -> dict:
             )
         except ImportError:
             continue
-        # Pass 1: bucket by friendly_name, preferring the non-dated id.
         chosen: dict[str, dict] = {}
         order: list[str] = []
         for model_id, details in (mod.MODEL_DETAILS or {}).items():
@@ -2648,11 +2778,34 @@ async def get_available_models() -> dict:
                 continue
             existing_dated = bool(_DATED_MODEL_RE.search(existing["model_id"]))
             new_dated = bool(_DATED_MODEL_RE.search(model_id))
-            # Replace dated -> alias; ignore alias -> dated.
             if existing_dated and not new_dated:
                 chosen[friendly] = entry
         providers[name] = [chosen[fr] for fr in order]
     return {"providers": providers}
+
+
+@app.get("/api/config/models")
+async def get_available_models() -> dict:
+    """Catalog of provider + model entries for the frontend picker.
+
+    Only loads catalogs for providers that have keys configured. Cached on
+    first build; pre-warmed at lifespan startup. The build is run in a
+    worker thread because the underlying SDK imports (anthropic, bedrock)
+    take seconds and would otherwise freeze the event loop.
+
+    Dedup rule: when two model_ids share a friendly_name (e.g.
+    `claude-sonnet-4-5` and `claude-sonnet-4-5-20250929` both surface as
+    "Claude Sonnet 4.5"), prefer the alias (no -YYYYMMDD suffix). The
+    alias auto-tracks the current stable and is what `AGENTEX_API_MODEL`
+    defaults expect.
+    """
+    global _MODEL_CATALOG_CACHE
+    if _MODEL_CATALOG_CACHE is not None:
+        return _MODEL_CATALOG_CACHE
+    async with _MODEL_CATALOG_LOCK:
+        if _MODEL_CATALOG_CACHE is None:
+            _MODEL_CATALOG_CACHE = await asyncio.to_thread(_build_model_catalog)
+    return _MODEL_CATALOG_CACHE
 
 
 @app.get("/api/spend")

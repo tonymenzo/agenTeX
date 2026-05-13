@@ -278,6 +278,31 @@ body {
   background: rgba(224, 113, 109, 0.12);
   border-color: var(--err);
 }
+/* Muted-danger: looks neutral at rest, reveals the destructive intent on
+   hover. Used for delete actions that the user shouldn't accidentally
+   trigger but also shouldn't have visually screaming at them. */
+.modal-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.modal-btn:disabled:hover {
+  color: var(--text-dim);
+  border-color: var(--border);
+  background: transparent;
+}
+.timeline-clear,
+.delete-entry-btn {
+  color: var(--text-dim);
+}
+.timeline-clear:not(:disabled):hover,
+.delete-entry-btn:hover {
+  color: var(--err);
+  border-color: rgba(224, 113, 109, 0.55);
+  background: rgba(224, 113, 109, 0.10);
+}
+.timeline-actions {
+  gap: 8px;
+}
 
 /* ---------- Timeline / History panel ---------- */
 .timeline-dialog {
@@ -472,6 +497,16 @@ body {
 }
 .diff-line.removed .diff-sign { color: var(--err); }
 .diff-line.context { color: var(--text-dim); }
+.diff-line.gap {
+  color: var(--text-dim);
+  opacity: 0.55;
+  font-style: italic;
+  background: rgba(255, 255, 255, 0.015);
+  border-top: 1px dashed rgba(255, 255, 255, 0.06);
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+  user-select: none;
+}
+.diff-line.gap .diff-sign { color: transparent; }
 
 /* ---------- Cite modal (INSPIRE-HEP) ---------- */
 .cite-dialog {
@@ -525,11 +560,21 @@ body {
 .status {
   display: inline-flex;
   align-items: center;
+  /* justify-content: flex-end packs the dot+label pair against the right
+     edge of the reserved min-width slot. When the label is short ("idle"),
+     the slack appears as empty space to the LEFT of the dot — next to the
+     previous button — so the dot stays glued to its label and the buttons
+     don't reflow as the label width changes. */
+  justify-content: flex-end;
   gap: 6px;
-  font-size: 12.5px;
+  min-width: 8.5em;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+.status .label { line-height: 1; }
 
 .status .dot {
   width: 6px;
@@ -681,8 +726,8 @@ body {
   border: 1px dashed var(--border);
   border-radius: 4px;
   color: var(--text-dim);
-  font-family: var(--sans);
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 13px;
   cursor: pointer;
   text-align: left;
   transition: color 0.12s ease, border-color 0.12s ease;
@@ -1517,6 +1562,48 @@ body {
   white-space: nowrap;
   min-width: 0;
   max-width: 160px;
+}
+
+/* Stable comment id (e.g. #c0007). Sits beside the author chip so the user
+   has a copy-pasteable handle to reference in external agents. Quiet by
+   default; full strength on hover so it's always findable but never
+   competes with the comment body. */
+.comment-id-chip {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 14px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.12s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  flex: 0 0 auto;
+  user-select: all;
+}
+.comment-id-chip:hover {
+  opacity: 1;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.comment-id-chip:focus-visible {
+  outline: none;
+  opacity: 1;
+  color: var(--text);
+  border-color: var(--accent, rgba(139, 158, 255, 0.6));
+}
+.comment-id-chip.copied {
+  color: rgba(105, 194, 147, 0.95);
+  border-color: rgba(105, 194, 147, 0.4);
+  background: rgba(105, 194, 147, 0.12);
+  opacity: 1;
 }
 .comment-ts {
   font-size: 11px;

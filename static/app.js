@@ -242,26 +242,88 @@
     }
   }
 
+  // Git-style hunked diff: 3 lines of context on each side of every change,
+  // long unchanged runs collapsed into a "… N unchanged lines …" placeholder.
+  // Scales to 100-page docs because only the changed regions are rendered.
+  const DIFF_CONTEXT_LINES = 3;
+
   function renderDiffHtml(beforeText, afterText) {
     if (!window.Diff) {
       return '<div class="diff-loading">Loading diff…</div>';
     }
     const parts = window.Diff.diffLines(beforeText || "", afterText || "");
-    let html = '<div class="diff-block">';
+    // Flatten chunks → per-line records so we can reason about distance-to-
+    // nearest-change. Each record: {type: "added"|"removed"|"context", text}.
+    const lines = [];
     for (const p of parts) {
-      const cls = p.added ? "added" : p.removed ? "removed" : "context";
-      const sign = p.added ? "+" : p.removed ? "-" : " ";
-      const lines = p.value.split("\n");
-      // Drop the trailing empty from a chunk ending in \n
-      if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-      for (const line of lines) {
-        html +=
-          `<div class="diff-line ${cls}">` +
-          `<span class="diff-sign">${sign}</span>` +
-          `<span class="diff-content">${escapeHtml(line || " ")}</span>` +
-          "</div>";
-      }
+      const type = p.added ? "added" : p.removed ? "removed" : "context";
+      const raw = p.value.split("\n");
+      // Drop the trailing empty produced by chunks that end in "\n".
+      if (raw.length > 1 && raw[raw.length - 1] === "") raw.pop();
+      for (const text of raw) lines.push({ type, text });
     }
+
+    if (lines.length === 0) {
+      return '<div class="diff-block"><div class="diff-meta">No changes.</div></div>';
+    }
+    // If nothing changed at all, surface that explicitly instead of dumping
+    // the whole doc as context.
+    if (!lines.some((l) => l.type !== "context")) {
+      return (
+        '<div class="diff-block">' +
+        `<div class="diff-line gap">` +
+        `<span class="diff-sign"> </span>` +
+        `<span class="diff-content">… ${lines.length} unchanged line${lines.length === 1 ? "" : "s"} (no changes) …</span>` +
+        `</div></div>`
+      );
+    }
+
+    // Mark which lines to show: anything within DIFF_CONTEXT_LINES of a
+    // changed line. Walk twice (forward + backward) to splay the context
+    // window symmetrically.
+    const show = new Array(lines.length).fill(false);
+    let dist = Infinity;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].type !== "context") dist = 0;
+      else dist++;
+      if (dist <= DIFF_CONTEXT_LINES) show[i] = true;
+    }
+    dist = Infinity;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].type !== "context") dist = 0;
+      else dist++;
+      if (dist <= DIFF_CONTEXT_LINES) show[i] = true;
+    }
+
+    // Emit. Runs of hidden lines collapse into one gap row carrying the
+    // skipped count.
+    let html = '<div class="diff-block">';
+    let hidden = 0;
+    const flushGap = () => {
+      if (hidden > 0) {
+        html +=
+          `<div class="diff-line gap">` +
+          `<span class="diff-sign"> </span>` +
+          `<span class="diff-content">… ${hidden} unchanged line${hidden === 1 ? "" : "s"} …</span>` +
+          `</div>`;
+        hidden = 0;
+      }
+    };
+    for (let i = 0; i < lines.length; i++) {
+      if (!show[i]) {
+        hidden++;
+        continue;
+      }
+      flushGap();
+      const l = lines[i];
+      const sign = l.type === "added" ? "+" : l.type === "removed" ? "-" : " ";
+      html +=
+        `<div class="diff-line ${l.type}">` +
+        `<span class="diff-sign">${sign}</span>` +
+        `<span class="diff-content">${escapeHtml(l.text || " ")}</span>` +
+        `</div>`;
+    }
+    flushGap();
     html += "</div>";
     return html;
   }
@@ -370,15 +432,72 @@
         : '<div class="diff-meta">First snapshot for this doc — full content shown as additions.</div>';
       detail.innerHTML = note + diffHtml +
         `<div class="timeline-actions">` +
+        `<button class="modal-btn delete-entry-btn" type="button">Delete this snapshot</button>` +
         `<button class="modal-btn primary rewind-btn" type="button">Rewind to this point</button>` +
         `</div>`;
       detail
         .querySelector(".rewind-btn")
         .addEventListener("click", () => doRewind(entry.doc, entry.hash));
+      detail
+        .querySelector(".delete-entry-btn")
+        .addEventListener("click", () => doDeleteEntry(entry));
       loaded = true;
     });
 
     return wrap;
+  }
+
+  async function doDeleteEntry(entry) {
+    const confirmed = await openConfirmDialog({
+      message: `Delete this snapshot of "${entry.doc}" from ${formatTime(entry.ts)}? The diff cannot be recovered.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      const r = await fetch("/api/timeline/entry/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ts: entry.ts, hash: entry.hash }),
+      });
+      if (!r.ok) {
+        const err = await r.text();
+        await openAlertDialog({ message: "Delete failed: " + err });
+        return;
+      }
+      await refreshTimelineModal();
+    } catch (e) {
+      await openAlertDialog({ message: "Delete failed: " + e.message });
+    }
+  }
+
+  async function doClearTimeline() {
+    const confirmed = await openConfirmDialog({
+      message:
+        "Clear ALL history? Every snapshot will be deleted and cannot be recovered. The recording toggle is preserved.",
+      confirmLabel: "Clear all",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      const r = await fetch("/api/timeline/clear", { method: "POST" });
+      if (!r.ok) {
+        const err = await r.text();
+        await openAlertDialog({ message: "Clear failed: " + err });
+        return;
+      }
+      await refreshTimelineModal();
+    } catch (e) {
+      await openAlertDialog({ message: "Clear failed: " + e.message });
+    }
+  }
+
+  // Re-render the modal in place after a delete/clear. Cheaper than
+  // closing-and-reopening because the user is mid-task — preserve focus.
+  async function refreshTimelineModal() {
+    if (!timelineModalEl) return;
+    closeTimelineModal();
+    await openTimelineModal();
   }
 
   async function openTimelineModal() {
@@ -411,12 +530,21 @@
       `<input type="checkbox" ${enabled ? "checked" : ""}>` +
       `<span class="track"><span class="thumb"></span></span>` +
       `<span class="switch-label">Recording</span>`;
+    const clearBtn = document.createElement("button");
+    clearBtn.className = "modal-btn timeline-clear";
+    clearBtn.type = "button";
+    clearBtn.textContent = "Clear all";
+    clearBtn.disabled = entries.length === 0;
+    clearBtn.title = clearBtn.disabled
+      ? "Nothing to clear"
+      : "Delete every snapshot and timeline entry";
     const closeBtn = document.createElement("button");
     closeBtn.className = "modal-btn timeline-close";
     closeBtn.type = "button";
     closeBtn.textContent = "Close";
     header.appendChild(title);
     header.appendChild(switchLabel);
+    header.appendChild(clearBtn);
     header.appendChild(closeBtn);
     dialog.appendChild(header);
 
@@ -467,6 +595,10 @@
       if (e.target === backdrop) close();
     });
     closeBtn.addEventListener("click", close);
+    clearBtn.addEventListener("click", () => {
+      if (clearBtn.disabled) return;
+      doClearTimeline();
+    });
 
     const cb = switchLabel.querySelector("input");
     cb.addEventListener("change", async (e) => {
@@ -2264,6 +2396,42 @@
     return toggle;
   }
 
+  // Small monospace pill that surfaces the comment's stable id (e.g. #c0007).
+  // Click to copy — gives the user a handle they can paste into an external
+  // agent ("look at #c0007") that resolves back via the comment MCP tools.
+  function buildCommentIdChip(id) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "comment-id-chip";
+    chip.textContent = "#" + id;
+    chip.title = `Comment id ${id} — click to copy`;
+    chip.setAttribute("aria-label", `Copy comment id ${id}`);
+    chip.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(id);
+      } catch {
+        // Older browsers / insecure contexts — fall back to a hidden textarea.
+        const ta = document.createElement("textarea");
+        ta.value = id;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch {}
+        document.body.removeChild(ta);
+      }
+      chip.classList.add("copied");
+      const prev = chip.textContent;
+      chip.textContent = "copied";
+      setTimeout(() => {
+        chip.textContent = prev;
+        chip.classList.remove("copied");
+      }, 900);
+    });
+    return chip;
+  }
+
   function buildCommentRow(c, depth, autoOpenReply = false, rootId = null) {
     // Reply / Post behavior is governed by the THREAD's agent toggle, not
     // the row's. For top-level comments rootId === c.id.
@@ -2287,6 +2455,8 @@
       (c.author === "agent" ? " is-agent" : " is-user");
     authorTag.textContent = c.author || "user";
     head.appendChild(authorTag);
+
+    head.appendChild(buildCommentIdChip(c.id));
 
     if (c.author === "agent" && c.model) {
       const modelTag = document.createElement("span");
@@ -3318,6 +3488,12 @@
       if (c.resolved) continue;
       if (c.kind === "doc") continue;
       if (c.kind === "reply") continue; // replies live nested under parents
+      // Skip orphaned comments — the line number stored on the comment is
+      // the LAST place the anchor was seen, not where it lives now. Painting
+      // a dot there points at whatever unrelated text now occupies that
+      // line. The sidebar still surfaces the orphaned thread, so dropping
+      // the gutter mark doesn't hide the comment, just stops misleading.
+      if (c.orphaned) continue;
       const line = c.kind === "range" ? c.from_line : c.line;
       if (typeof line !== "number") continue;
       if (!byLine.has(line)) byLine.set(line, { errors: [], comments: [] });
