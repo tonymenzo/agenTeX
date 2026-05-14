@@ -1487,10 +1487,19 @@
     downloadBtn.disabled = false;
     const myToken = ++renderToken;
     if (!anchor) {
-      const sh = previewEl.scrollHeight;
-      anchor = sh > 0
-        ? { ratio: previewEl.scrollTop / sh, offset: 0 }
-        : { ratio: 0, offset: 0 };
+      // Prefer the persisted per-target scroll ratio (loaded from
+      // localStorage at startup) so a page reload lands where you left
+      // off. Fall back to the current scrollTop ratio for in-session
+      // re-renders.
+      const saved = renderTargetName ? previewScrollByTarget.get(renderTargetName) : null;
+      if (saved && typeof saved.ratio === "number") {
+        anchor = { ratio: saved.ratio, offset: 0 };
+      } else {
+        const sh = previewEl.scrollHeight;
+        anchor = sh > 0
+          ? { ratio: previewEl.scrollTop / sh, offset: 0 }
+          : { ratio: 0, offset: 0 };
+      }
     }
     let pdf;
     try {
@@ -1808,11 +1817,14 @@
     const wasInMdMode = previewEl.classList.contains("md");
     previewEl.classList.remove("pdf");
     previewEl.classList.add("md");
-    // Only reset scroll when transitioning into MD from another mode.
-    // Re-renders within MD (e.g. switching to a .bib while MD is the
-    // render target) should keep the user's scroll position.
+    // Re-renders within MD mode preserve the current scrollTop. On a
+    // transition from PDF or from a fresh page load, prefer the persisted
+    // per-target ratio; otherwise start at the top.
     const prevTop = wasInMdMode ? previewEl.scrollTop : 0;
     const prevLeft = wasInMdMode ? previewEl.scrollLeft : 0;
+    const savedRatio = !wasInMdMode && renderTargetName
+      ? (previewScrollByTarget.get(renderTargetName) || {}).ratio
+      : null;
     const html = window.marked ? window.marked.parse(text || "") : escapeHtml(text || "");
     previewEl.innerHTML = `<article class="md-body">${html}</article>`;
     if (window.renderMathInElement) {
@@ -1834,7 +1846,11 @@
     // jump the user back to the top.
     const maxTop = Math.max(0, previewEl.scrollHeight - previewEl.clientHeight);
     const maxLeft = Math.max(0, previewEl.scrollWidth - previewEl.clientWidth);
-    previewEl.scrollTop = Math.min(prevTop, maxTop);
+    const sh = previewEl.scrollHeight;
+    const persistedTop = (typeof savedRatio === "number" && sh > 0)
+      ? Math.round(savedRatio * sh)
+      : null;
+    previewEl.scrollTop = Math.min(persistedTop != null ? persistedTop : prevTop, maxTop);
     previewEl.scrollLeft = Math.min(prevLeft, maxLeft);
   }
 
@@ -1964,6 +1980,66 @@
   // this so a tab switch always captures the outgoing doc's state.
   let editorActiveDoc = null;
   const docViewState = new Map();
+  // Per-source-doc preview scroll ratio. Keyed by renderTargetName (the
+  // .tex/.md doc that produces the preview), since the PDF URL changes
+  // on every Cmd+S re-render and isn't a stable key across reloads.
+  const previewScrollByTarget = new Map();
+
+  // --- Persistent scroll state ---------------------------------------------
+  // docViewState + previewScrollByTarget are in-memory; persist them so a
+  // page reload doesn't drop you back at the top of every doc.
+  const SCROLL_STATE_KEY = "scrollStateV1";
+  const SCROLL_PERSIST_DEBOUNCE = 1200;
+  let _persistScrollTimer = null;
+
+  function _captureCurrentPreviewScroll() {
+    if (!renderTargetName) return;
+    const sh = previewEl.scrollHeight;
+    if (sh <= 0) return;
+    previewScrollByTarget.set(renderTargetName, {
+      ratio: previewEl.scrollTop / sh,
+    });
+  }
+
+  function persistScrollState() {
+    snapshotViewState(editorActiveDoc);
+    _captureCurrentPreviewScroll();
+    const ed = {};
+    for (const [name, s] of docViewState) {
+      if (!s) continue;
+      ed[name] = {
+        cursor: s.cursor ? { line: s.cursor.line, ch: s.cursor.ch } : null,
+        scroll: s.scroll ? { top: s.scroll.top, left: s.scroll.left } : null,
+      };
+    }
+    const pv = {};
+    for (const [name, s] of previewScrollByTarget) {
+      if (s && typeof s.ratio === "number") pv[name] = { ratio: s.ratio };
+    }
+    lsSet(SCROLL_STATE_KEY, { editor: ed, preview: pv });
+  }
+
+  function schedulePersistScroll() {
+    if (_persistScrollTimer) clearTimeout(_persistScrollTimer);
+    _persistScrollTimer = setTimeout(persistScrollState, SCROLL_PERSIST_DEBOUNCE);
+  }
+
+  function loadPersistedScrollState() {
+    const state = lsGet(SCROLL_STATE_KEY, null);
+    if (!state || typeof state !== "object") return;
+    if (state.editor && typeof state.editor === "object") {
+      for (const [name, s] of Object.entries(state.editor)) {
+        if (s && typeof s === "object") docViewState.set(name, s);
+      }
+    }
+    if (state.preview && typeof state.preview === "object") {
+      for (const [name, s] of Object.entries(state.preview)) {
+        if (s && typeof s.ratio === "number") previewScrollByTarget.set(name, s);
+      }
+    }
+  }
+  loadPersistedScrollState();
+
   function snapshotViewState(name) {
     if (!name) return;
     try {
@@ -2685,6 +2761,7 @@
   // scroll fires at most one recompute per frame.
   let _pageScrollRaf = 0;
   previewEl.addEventListener("scroll", () => {
+    schedulePersistScroll();
     if (!previewEl.classList.contains("pdf")) return;
     if (_pageScrollRaf) return;
     _pageScrollRaf = requestAnimationFrame(() => {
@@ -2696,6 +2773,22 @@
       }
     });
   }, { passive: true });
+
+  // Persist editor cursor + scroll on activity. CM fires `scroll` per
+  // wheel/keyboard scroll; `cursorActivity` covers cursor moves that
+  // don't scroll.
+  editor.on("scroll", schedulePersistScroll);
+  editor.on("cursorActivity", schedulePersistScroll);
+
+  // Make sure unsaved scroll state survives reload / tab close. pagehide
+  // fires more reliably than beforeunload on modern browsers; both are
+  // hooked for redundancy. visibilitychange covers the case where the
+  // user switches to a different tab and we want to checkpoint.
+  window.addEventListener("pagehide", persistScrollState);
+  window.addEventListener("beforeunload", persistScrollState);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") persistScrollState();
+  });
 
   // Editor font zoom: same Cmd/Ctrl + +/-/0 keys as the PDF zoom, routed
   // by whichever pane the user is actively in. Persisted in localStorage
