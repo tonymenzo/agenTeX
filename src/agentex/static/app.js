@@ -762,7 +762,32 @@
     const af = activeName || "";
     if (af.endsWith(".bib") || af.endsWith(".txt")) return;
     const cursor = editor.getCursor();
-    const text = `\\cite{${key}}`;
+
+    // If the cursor sits inside an open \cite[a-z]*{...} (anywhere within
+    // ~30 lines of context — handles multi-line citation blocks), we're
+    // appending to a chain rather than starting a new one. Smart-insert:
+    //   {│}          → KEY          (right after the brace; no comma)
+    //   {A,│}        → KEY          (user already typed the comma)
+    //   {A,  │}      → KEY          (comma + whitespace)
+    //   {A│}         → ,KEY         (no comma yet; supply it)
+    const lookbackStart = { line: Math.max(0, cursor.line - 30), ch: 0 };
+    const before = editor.getRange(lookbackStart, cursor);
+    const ciOpenRe = /\\cite[a-z]*\{/gi;
+    let lastOpenEnd = -1;
+    let m;
+    while ((m = ciOpenRe.exec(before)) !== null) {
+      lastOpenEnd = m.index + m[0].length;
+    }
+    const insideCite =
+      lastOpenEnd !== -1 && !before.slice(lastOpenEnd).includes("}");
+
+    let text;
+    if (insideCite) {
+      const tail = before.slice(lastOpenEnd).replace(/\s+$/, "");
+      text = (tail === "" || tail.endsWith(",")) ? key : "," + key;
+    } else {
+      text = `\\cite{${key}}`;
+    }
     editor.replaceRange(text, cursor);
     editor.setCursor({ line: cursor.line, ch: cursor.ch + text.length });
     editor.focus();
