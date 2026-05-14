@@ -1213,10 +1213,20 @@ body {
 }
 .comment-text-segment {
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.65;
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* KaTeX defaults to 1.21em scaling, which feels chunky inline in a
+   narrow comments column. Tighten so math flows with prose. Tighten
+   display-math margins too (default 1em was sized for spacious .md-body
+   pages). */
+.comment-text-segment .katex {
+  font-size: 1.05em;
+}
+.comment-text-segment .katex-display {
+  margin: 0.4em 0;
 }
 
 /* Legacy: kept for any old comment rendered through .comment-tool-calls. */
