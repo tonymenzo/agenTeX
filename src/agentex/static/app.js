@@ -658,6 +658,24 @@
   // hover; consumed by Enter to pick a result. Reset on each new render.
   let citeResults = [];
   let citeActiveIndex = -1;
+  // When the modal was opened with a selected key (Shift+Cmd+K over a
+  // highlighted \cite{key} or bare texkey), this holds that key. Cleared
+  // as soon as the user types into the search input — at that point they
+  // own the query and we no longer auto-confirm on a texkey match.
+  let citePrefilledKey = null;
+
+  // Pull a candidate INSPIRE texkey out of a selection. Strips a wrapping
+  // \cite{...}, \citep{...}, etc., and picks the first key if the user
+  // selected a multi-key citation (\cite{A,B,C}). Returns empty string
+  // when the selection isn't useful.
+  function extractKeyFromSelection(text) {
+    if (!text) return "";
+    text = text.trim();
+    const m = text.match(/\\cite[a-z]*\{([^}]+)\}/i);
+    if (m) text = m[1];
+    if (text.includes(",")) text = text.split(",")[0].trim();
+    return text;
+  }
 
   function applyCiteActive(container) {
     const rows = container.querySelectorAll(".cite-result");
@@ -672,6 +690,29 @@
   function renderCiteResults(container, results) {
     citeResults = results || [];
     citeActiveIndex = citeResults.length > 0 ? 0 : -1;
+
+    // Auto-confirm on exact texkey match when the modal was opened with a
+    // prefilled key (Shift+Cmd+K over a highlighted \cite{key}). Skips the
+    // \cite insertion since the user already has the key in the doc; the
+    // server-side BibTeX append is the value-add here. Cleared so the
+    // logic only fires once per prefill.
+    if (citePrefilledKey && citeResults.length > 0) {
+      const target = citePrefilledKey.toLowerCase();
+      const exactIdx = citeResults.findIndex((r) => {
+        const keys = Array.isArray(r.texkeys) ? r.texkeys : [];
+        return keys.some((k) => String(k).toLowerCase() === target);
+      });
+      if (exactIdx >= 0) {
+        const match = citeResults[exactIdx];
+        citePrefilledKey = null;
+        doCite(match, { skipInsert: true });
+        return;
+      }
+      // No exact match — fall through to normal rendering. Keep
+      // citePrefilledKey set so a re-search with a refined query can still
+      // attempt the auto-confirm.
+    }
+
     if (!results.length) {
       container.innerHTML = '<div class="cite-empty">No matches.</div>';
       return;
@@ -727,7 +768,8 @@
     editor.focus();
   }
 
-  async function doCite(result) {
+  async function doCite(result, opts) {
+    const skipInsert = !!(opts && opts.skipInsert);
     try {
       const r = await fetch("/api/inspire/cite", {
         method: "POST",
@@ -744,18 +786,23 @@
         await openAlertDialog({ message: "Cite failed: no key returned" });
         return;
       }
-      insertCiteAtCursor(data.key);
+      // skipInsert means: the user selected an existing key in the doc
+      // (or otherwise wants to populate ref.bib without inserting a new
+      // \cite). The BibTeX append already happened server-side; we just
+      // close.
+      if (!skipInsert) insertCiteAtCursor(data.key);
       closeCiteModal();
     } catch (e) {
       await openAlertDialog({ message: "Cite failed: " + e.message });
     }
   }
 
-  async function openCiteModal() {
+  async function openCiteModal(prefillText) {
     if (citeModalEl) return;
     // Fresh open — make sure keyboard-nav state isn't carrying over.
     citeResults = [];
     citeActiveIndex = -1;
+    citePrefilledKey = null;
 
     const backdrop = document.createElement("div");
     backdrop.className = "modal-backdrop";
@@ -839,6 +886,8 @@
     }
 
     searchInput.addEventListener("input", () => {
+      // User took over the query — no longer in auto-confirm mode.
+      citePrefilledKey = null;
       if (citeSearchTimer) clearTimeout(citeSearchTimer);
       const q = searchInput.value;
       citeSearchTimer = setTimeout(() => doSearch(q), 300);
@@ -867,7 +916,20 @@
       }
     });
 
-    requestAnimationFrame(() => searchInput.focus());
+    if (typeof prefillText === "string" && prefillText.trim()) {
+      const q = prefillText.trim();
+      citePrefilledKey = q;
+      searchInput.value = q;
+      // Fire the search immediately (bypass the input-debounce path).
+      doSearch(q);
+    }
+
+    requestAnimationFrame(() => {
+      searchInput.focus();
+      // Selecting the prefill makes it easy to overwrite with the
+      // keyboard if INSPIRE didn't have it.
+      if (searchInput.value) searchInput.select();
+    });
   }
 
   function closeCiteModal() {
@@ -876,7 +938,9 @@
     citeModalEl = null;
   }
 
-  citeBtn.addEventListener("click", openCiteModal);
+  citeBtn.addEventListener("click", () => {
+    openCiteModal(extractKeyFromSelection(editor.getSelection()));
+  });
 
   // ---------- cite-as-you-type ----------
   // While the cursor is inside \cite{...}, surface local .bib keys + INSPIRE
@@ -3779,8 +3843,8 @@
     ...(editor.getOption("extraKeys") || {}),
     "Cmd-K": () => openCmdkPrompt(),
     "Ctrl-K": () => openCmdkPrompt(),
-    "Shift-Cmd-K": () => openCiteModal(),
-    "Shift-Ctrl-K": () => openCiteModal(),
+    "Shift-Cmd-K": () => openCiteModal(extractKeyFromSelection(editor.getSelection())),
+    "Shift-Ctrl-K": () => openCiteModal(extractKeyFromSelection(editor.getSelection())),
   });
 
   commentsBtn.addEventListener("click", () => {
