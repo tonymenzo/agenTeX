@@ -2859,6 +2859,30 @@
     }
   }
 
+  // Comment text supports inline TeX math via KaTeX's auto-render. Same
+  // delimiters as the markdown preview so users can paste a snippet from
+  // their .tex doc into a comment and have it render the same way.
+  // Streaming chunks stay plain text — partial math like `$x +` would
+  // parse-fail; renderCommentsPanel re-renders the row from state once
+  // the stream ends, at which point this runs on the finalized text.
+  function renderCommentTextWithMath(el, text) {
+    el.textContent = text || "";
+    if (!window.renderMathInElement || !text) return;
+    try {
+      window.renderMathInElement(el, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "\\(", right: "\\)", display: false },
+          { left: "$", right: "$", display: false },
+        ],
+        throwOnError: false,
+      });
+    } catch (e) {
+      console.warn("KaTeX comment render failed", e);
+    }
+  }
+
   function appendAgentStreamChunk(commentId, text) {
     if (!commentId || !text) return;
     streamingText.set(commentId, (streamingText.get(commentId) || "") + text);
@@ -3065,7 +3089,7 @@
         if (ev.type === "text" && ev.text) {
           const seg = document.createElement("div");
           seg.className = "comment-text-segment";
-          seg.textContent = ev.text;
+          renderCommentTextWithMath(seg, ev.text);
           flow.appendChild(seg);
         } else if (ev.type === "tool_call") {
           upsertToolCallPill(c.id, {
@@ -3084,7 +3108,7 @@
       // replies, or user-authored comments which never have events).
       const seg = document.createElement("div");
       seg.className = "comment-text-segment";
-      seg.textContent = c.message;
+      renderCommentTextWithMath(seg, c.message);
       flow.appendChild(seg);
     }
     if (c.streaming || streamingText.has(c.id)) {
@@ -3944,7 +3968,7 @@
       block.className = "line-popup-block line-popup-comment";
       const msg = document.createElement("div");
       msg.className = "comment-popup-msg clamped";
-      msg.textContent = c.message;
+      renderCommentTextWithMath(msg, c.message);
       block.appendChild(msg);
       const more = document.createElement("button");
       more.type = "button";
