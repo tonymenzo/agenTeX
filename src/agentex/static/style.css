@@ -557,6 +557,10 @@ body {
   transition: background 0.1s ease;
 }
 .cite-result:hover { background: rgba(255,255,255,0.04); }
+.cite-result.active {
+  background: rgba(232, 195, 79, 0.08);
+  box-shadow: inset 2px 0 0 rgba(232, 195, 79, 0.55);
+}
 .cite-result:last-child { border-bottom: 0; }
 .cite-title {
   color: var(--text);

@@ -654,14 +654,30 @@
   let citeModalEl = null;
   let citeSearchTimer = null;
   let citeLastQuery = "";
+  // Keyboard-navigation state for the modal. Updated by Arrow keys + mouse
+  // hover; consumed by Enter to pick a result. Reset on each new render.
+  let citeResults = [];
+  let citeActiveIndex = -1;
+
+  function applyCiteActive(container) {
+    const rows = container.querySelectorAll(".cite-result");
+    rows.forEach((row, idx) => {
+      row.classList.toggle("active", idx === citeActiveIndex);
+    });
+    if (citeActiveIndex >= 0 && rows[citeActiveIndex]) {
+      rows[citeActiveIndex].scrollIntoView({ block: "nearest" });
+    }
+  }
 
   function renderCiteResults(container, results) {
+    citeResults = results || [];
+    citeActiveIndex = citeResults.length > 0 ? 0 : -1;
     if (!results.length) {
       container.innerHTML = '<div class="cite-empty">No matches.</div>';
       return;
     }
     container.replaceChildren();
-    for (const r of results) {
+    results.forEach((r, idx) => {
       const row = document.createElement("div");
       row.className = "cite-result";
       const title = document.createElement("div");
@@ -685,8 +701,17 @@
       meta.textContent = parts.join(" · ");
       row.appendChild(meta);
       row.addEventListener("click", () => doCite(r));
+      // Mouse hover syncs the keyboard-active selection so the two
+      // input modes don't fight each other.
+      row.addEventListener("mouseenter", () => {
+        if (idx !== citeActiveIndex) {
+          citeActiveIndex = idx;
+          applyCiteActive(container);
+        }
+      });
       container.appendChild(row);
-    }
+    });
+    applyCiteActive(container);
   }
 
   function insertCiteAtCursor(key) {
@@ -728,6 +753,9 @@
 
   async function openCiteModal() {
     if (citeModalEl) return;
+    // Fresh open — make sure keyboard-nav state isn't carrying over.
+    citeResults = [];
+    citeActiveIndex = -1;
 
     const backdrop = document.createElement("div");
     backdrop.className = "modal-backdrop";
@@ -816,10 +844,26 @@
       citeSearchTimer = setTimeout(() => doSearch(q), 300);
     });
     searchInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
+      if (e.key === "ArrowDown") {
+        if (citeResults.length === 0) return;
         e.preventDefault();
-        if (citeSearchTimer) clearTimeout(citeSearchTimer);
-        doSearch(searchInput.value);
+        citeActiveIndex = Math.min(citeActiveIndex + 1, citeResults.length - 1);
+        applyCiteActive(results);
+      } else if (e.key === "ArrowUp") {
+        if (citeResults.length === 0) return;
+        e.preventDefault();
+        citeActiveIndex = Math.max(citeActiveIndex - 1, 0);
+        applyCiteActive(results);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (citeActiveIndex >= 0 && citeResults[citeActiveIndex]) {
+          doCite(citeResults[citeActiveIndex]);
+        } else {
+          // No active row yet (still typing, or zero matches). Force an
+          // immediate search rather than waiting on the debounce.
+          if (citeSearchTimer) clearTimeout(citeSearchTimer);
+          doSearch(searchInput.value);
+        }
       }
     });
 
