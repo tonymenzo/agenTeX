@@ -2,7 +2,9 @@
 
 A next-to-minimal live editing surface for agent-assisted writing.
 
-I wanted a LaTeX/Markdown editor with fluid LLM integration. Existing modalities have what I call "discontinuities" or UI gaps that hinder my "flow state" during writing. For example, within a web or desktop application (Claude, ChatGPT, and friends) you upload, you ask, you download, you diff manually if you want any versioning. CLI and API agents have no live canvas and suffer from merge races. Iterating in an IDE currently provides the smoothest experience, in my opinion but again suffers from versioning and merge conflicts.
+I wanted a LaTeX/Markdown editor with fluid LLM integration. Existing modalities have what I'll call discontinuities, i.e., UI gaps that break flow. For example, within a web or desktop application (Claude, ChatGPT, and friends) you upload, you ask, you download, and you diff manually if you want any versioning.
+
+CLI and API agents have no live canvas and suffer from merge races. Iterating in an IDE comes closest in my experience, but versioning and merge conflicts have to be handled by hand.
 
 agenTeX is an attempt at addressing these shortcomings. A master editing timeline allows for clear versioning and facilitates quick rewinds. Custom tools interface agents with the served documents and open external state tools usage for literature search and citation (arXiV, Google Scholar, iNSPIRE, PDG databases, etc), agent-based web surfing, etc. A "comments" panel supports standard annotations and doubles as an agentic message board.
 
@@ -85,21 +87,8 @@ agentex set AGENTEX_API_PROVIDER anthropic
 agentex unset ANTHROPIC_API_KEY
 ```
 
-## Layout
-
-- `src/agentex/server.py` — FastAPI backend: file watcher, WebSocket sync, tectonic render.
-- `src/agentex/static/` — single-page frontend (CodeMirror 5 + PDF.js).
-- `src/agentex/templates/` — `.tex` scaffolds (surfaced in the template picker) and `AGENT_GUIDE.md` (the agent system prompt, single source of truth).
-- `src/agentex/tools/` — MCP server exposing the live document to coding agents.
-- `src/agentex/cli.py` — the `agentex` console-script entry point.
-- `src/agentex/_bootstrap.py` — per-agent project setup (writes `AGENTS.md` + MCP config).
-- `AGENTS.md` — symlink to `src/agentex/templates/AGENT_GUIDE.md` so the repo dogfoods its own bootstrap.
-- `.claude/` — Claude Code config used when working on agenTeX itself.
-
 ## Engine
 
 Rendering uses [tectonic](https://tectonic-typesetting.github.io/) — a single-binary LaTeX engine that auto-fetches packages on first use.
 
-## Edit-conflict guard
-
-When working on agenTeX itself with Claude Code, a `PreToolUse` hook in `.claude/settings.json` blocks edits to a file whose mtime is newer than the agent's last read of it. If you edit while the agent is working, it'll be forced to re-read before continuing. The same principle is described in the agent guide for any agent driving agenTeX from MCP.
+The agent runtime is [orchestral](https://github.com/orchestralAI/orchestral-core). Tool definitions in `src/agentex/tools/` produce both the MCP schemas surfaced to external coding agents (Claude Code, Cursor, …) and the in-process tool wrappers driving the comment-panel agent loop in `server.py` — one source, two consumers. Orchestral's MCP server wrapper is also what ships the `AGENT_GUIDE.md` content as the server-level `instructions` field on initialize.

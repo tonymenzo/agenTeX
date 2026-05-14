@@ -129,14 +129,16 @@ def move_doc(src: str, dest: str) -> dict[str, Any]:
 def edit_doc(
     find: str,
     replace: str,
-    stream: bool = False,
+    stream: bool = True,
     delay_ms: int = 15,
 ) -> dict[str, Any]:
     """Replace a unique occurrence of `find` with `replace` in the active doc.
 
     `find` MUST appear exactly once — include surrounding context if a short
     phrase repeats. Returns 404 (find not present) or 409 (not unique).
-    `stream=True` types the replacement character-by-character.
+    Streams the replacement character-by-character by default; set
+    `stream=False` for mechanical edits (whitespace, renames, very long
+    replacements, or tight edit loops) where the animation is noise.
     """
     payload = {
         "find": find,

@@ -264,7 +264,7 @@ def read_doc() -> dict[str, Any]:
 
 
 @define_tool(base=StatelessRuntimeTool)
-def edit_doc(find: str, replace: str, stream: bool = False, delay_ms: int = 15) -> dict[str, Any]:
+def edit_doc(find: str, replace: str, stream: bool = True, delay_ms: int = 15) -> dict[str, Any]:
     """Replace a unique occurrence of `find` with `replace` in the live agenTeX doc.
 
     USE THIS FOR ANY EDIT to files under agentex/docs/. The native Edit and
@@ -283,10 +283,15 @@ def edit_doc(find: str, replace: str, stream: bool = False, delay_ms: int = 15) 
             enough surrounding context (or extra neighboring lines) if a short
             phrase appears more than once.
         replace: Replacement text. Empty string deletes the matched region.
-        stream: If True, the replacement is animated character-by-character
-            (the deleted region disappears first, then chars type in). Slower
-            and more dramatic --- use sparingly. Default False: instant
-            replacement, still visible live in the editor.
+        stream: If True (default), the replacement is animated character-by-
+            character (the deleted region disappears first, then chars type
+            in). This is the right behavior for prose changes the user wants
+            to witness as they happen. Set False for mechanical edits where
+            the animation is noise: whitespace/indentation fixes, renames,
+            code-block fence repairs, very long replacements where the
+            typewriter pass would outlast the user's patience, or tight
+            sequential edit loops where the cumulative animation blocks
+            further work.
         delay_ms: Per-character delay when streaming. Ignored when stream=False.
 
     Returns:

@@ -45,8 +45,14 @@ To edit a different doc, call `SetActiveDoc` first.
   compiles.
 - `NewDoc` — create a new file under the project root, optionally seeded from
   a template in `src/agentex/templates/`.
-- `EditDoc` — find/replace. Default for surgical changes. Set `stream=true`
-  for typing animation.
+- `EditDoc` — find/replace. Default for surgical changes. Streams the
+  replacement character-by-character by default so the user watches it
+  happen. This is the right behavior for prose changes they requested.
+  Set `stream=false` when the animation would be noise: mechanical
+  edits (whitespace, indentation, renames, code-block fence fixes),
+  very long replacements where the typewriter pass outlasts user
+  patience, or tight sequential edit loops where cumulative animation
+  blocks further work.
 - `StreamEdit` — append or insert at a line. Default tool for new sections,
   paragraphs, equations.
 
@@ -102,26 +108,3 @@ already up, and it spawns one detached if not.
 If a file's mtime is newer than your last read of it, re-read before writing.
 The user (or another process) may have changed it since you looked, and a
 blind overwrite would clobber their work.
-
-## Architecture quick reference
-
-- `src/agentex/server.py` — FastAPI + watchdog (PollingObserver) + tectonic.
-  Render runs in a daemon task that serializes builds (no cancellation
-  mid-tectonic). Pure-cwd project default with a deny-list for `~`, `/`, and
-  top-level system dirs.
-- `src/agentex/static/` — single-page CodeMirror 5 frontend with PDF.js
-  preview. PDF canvases are cached by URL so `.md ↔ .tex` toggles are a sync
-  DOM swap; tab reorder is HTML5 DnD with FLIP animation.
-- `src/agentex/templates/` — drop a `.tex` template in here; it appears in
-  the picker. `AGENT_GUIDE.md` (this file) lives here too and ships as
-  package data.
-- `src/agentex/tools/agentex.py` — orchestral-defined MCP tools (this file
-  documents their use).
-- `src/agentex/tools/mcp_server.py` — MCP stdio entry point, exposed as the
-  `agentex-mcp` console script.
-- `src/agentex/_suffixes.py` — canonical `TEXT_SUFFIXES` (editable) and
-  `RENDERABLE_SUFFIXES` (compiles to a preview pane).
-- `src/agentex/cli.py` — the `agentex` console script.
-- Project listing (`list_doc_names` / `list_doc_dirs` / `list_asset_names`)
-  is a single cached `os.walk` invalidated by the file watcher; cold ~1ms,
-  cached free.
