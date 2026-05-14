@@ -691,26 +691,17 @@
     citeResults = results || [];
     citeActiveIndex = citeResults.length > 0 ? 0 : -1;
 
-    // Auto-confirm on exact texkey match when the modal was opened with a
-    // prefilled key (Shift+Cmd+K over a highlighted \cite{key}). Skips the
-    // \cite insertion since the user already has the key in the doc; the
-    // server-side BibTeX append is the value-add here. Cleared so the
-    // logic only fires once per prefill.
+    // When the modal was opened with a prefilled key (Shift+Cmd+K over a
+    // highlighted \cite{key}), surface the exact texkey match — if any —
+    // as the active row so a single Enter keypress confirms it. Picking
+    // is still explicit; nothing fires silently.
     if (citePrefilledKey && citeResults.length > 0) {
       const target = citePrefilledKey.toLowerCase();
       const exactIdx = citeResults.findIndex((r) => {
         const keys = Array.isArray(r.texkeys) ? r.texkeys : [];
         return keys.some((k) => String(k).toLowerCase() === target);
       });
-      if (exactIdx >= 0) {
-        const match = citeResults[exactIdx];
-        citePrefilledKey = null;
-        doCite(match, { skipInsert: true });
-        return;
-      }
-      // No exact match — fall through to normal rendering. Keep
-      // citePrefilledKey set so a re-search with a refined query can still
-      // attempt the auto-confirm.
+      if (exactIdx >= 0) citeActiveIndex = exactIdx;
     }
 
     if (!results.length) {
@@ -763,15 +754,14 @@
     if (af.endsWith(".bib") || af.endsWith(".txt")) return;
     const cursor = editor.getCursor();
 
-    // If the cursor sits inside an open \cite[a-z]*{...} (anywhere within
-    // ~30 lines of context — handles multi-line citation blocks), we're
-    // appending to a chain rather than starting a new one. Smart-insert:
+    // If the cursor sits inside an open \cite[a-z]*{...} on the current
+    // line, append to its multi-key chain rather than starting a new
+    // citation. Smart-insert:
     //   {│}          → KEY          (right after the brace; no comma)
     //   {A,│}        → KEY          (user already typed the comma)
     //   {A,  │}      → KEY          (comma + whitespace)
     //   {A│}         → ,KEY         (no comma yet; supply it)
-    const lookbackStart = { line: Math.max(0, cursor.line - 30), ch: 0 };
-    const before = editor.getRange(lookbackStart, cursor);
+    const before = editor.getLine(cursor.line).slice(0, cursor.ch);
     const ciOpenRe = /\\cite[a-z]*\{/gi;
     let lastOpenEnd = -1;
     let m;
@@ -793,8 +783,20 @@
     editor.focus();
   }
 
-  async function doCite(result, opts) {
-    const skipInsert = !!(opts && opts.skipInsert);
+  async function doCite(result) {
+    // Skip the \cite{} insertion when the picked result's texkey matches
+    // the key the modal was opened with — the user already has the cite
+    // in their doc and just needs ref.bib populated; re-inserting would
+    // duplicate. When there's no prefill (modal opened blank, user typed
+    // a free query), the normal insertion path fires.
+    let skipInsert = false;
+    if (citePrefilledKey) {
+      const target = citePrefilledKey.toLowerCase();
+      const keys = Array.isArray(result.texkeys) ? result.texkeys : [];
+      if (keys.some((k) => String(k).toLowerCase() === target)) {
+        skipInsert = true;
+      }
+    }
     try {
       const r = await fetch("/api/inspire/cite", {
         method: "POST",
@@ -811,10 +813,6 @@
         await openAlertDialog({ message: "Cite failed: no key returned" });
         return;
       }
-      // skipInsert means: the user selected an existing key in the doc
-      // (or otherwise wants to populate ref.bib without inserting a new
-      // \cite). The BibTeX append already happened server-side; we just
-      // close.
       if (!skipInsert) insertCiteAtCursor(data.key);
       closeCiteModal();
     } catch (e) {
