@@ -40,7 +40,7 @@ Open <http://localhost:8000>. State (`.agentex/`) and build outputs (`.build/`) 
 | Keys | Action |
 |---|---|
 | `⌘S` | Render the preview (typing already auto-saves) |
-| `⌘K` | Inline prompt at the cursor: post a comment, or `⇧⏎` to Ask Agent |
+| `⌘K` | Inline prompt at the cursor: `⏎` to post a comment, or `⇧⏎` to Ask Agent |
 | `⇧⌘K` | Citation modal (INSPIRE-HEP); prefills from a highlighted key or selection |
 | `⌘+` `⌘-` `⌘0` | Zoom in / out / reset, routed to whichever pane has focus |
 | `⌘`-click in editor | Forward-sync to the PDF (jump to the corresponding location) |
