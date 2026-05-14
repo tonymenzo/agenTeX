@@ -35,6 +35,21 @@ agentex /path/to/project        # serve a different directory
 
 Open <http://localhost:8000>. State (`.agentex/`) and build outputs (`.build/`) live inside the project directory.
 
+## Shortcuts
+
+| Keys | Action |
+|---|---|
+| `⌘S` | Render the preview (typing already auto-saves) |
+| `⌘K` | Inline prompt at the cursor: post a comment, or `⇧⏎` to Ask Agent |
+| `⇧⌘K` | Citation modal (INSPIRE-HEP); prefills from a highlighted key or selection |
+| `⌘+` `⌘-` `⌘0` | Zoom in / out / reset, routed to whichever pane has focus |
+| `⌘`-click in editor | Forward-sync to the PDF (jump to the corresponding location) |
+| Double-click on PDF | Inverse-sync to the editor (jump to the corresponding line) |
+| `Ctrl`-scroll on PDF | Zoom anchored at the cursor |
+| `Esc` | Dismiss the current modal or popup |
+
+On non-Mac platforms `Ctrl` substitutes for `⌘`.
+
 ## Connect a coding agent
 
 agenTeX talks to coding agents (Claude Code, Cursor, Codex, …) over MCP. The
