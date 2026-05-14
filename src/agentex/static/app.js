@@ -4449,7 +4449,12 @@
       const positions = data.positions || [];
       if (!positions.length) return;
       const { page, x: pdfX, y: pdfY } = positions[0];
-      const canvas = previewEl.children[page - 1];
+      // Each page is now a .pdf-page-wrap containing the canvas (so the
+      // link layer can overlay it). Look up the canvas by data-page-num
+      // to be robust regardless of wrap structure.
+      const canvas = previewEl.querySelector(
+        `.pdf-page[data-page-num="${page}"]`,
+      );
       if (!canvas) return;
       const naturalW = parseFloat(canvas.dataset.naturalW);
       const naturalH = parseFloat(canvas.dataset.naturalH);
