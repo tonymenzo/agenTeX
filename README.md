@@ -1,4 +1,4 @@
-# agenTeX
+# agen$\TeX$
 
 A next-to-minimal live editing surface for agent-assisted writing.
 
