@@ -25,26 +25,41 @@ from agentex.tools.agentex import (
 
 
 def main() -> None:
-    MCPServer(
-        tools=[
-            ensure_server_running,
-            list_docs,
-            set_active_doc,
-            new_doc,
-            read_doc,
-            edit_doc,
-            stream_edit,
-            add_comment,
-            list_comments,
-            get_comment,
-            resolve_comment,
-            delete_comment,
-        ],
-        name="agenTeX",
-        version="0.1.0",
-        instructions=load_agent_guide(),
-        use_display_names=True,
-    ).run()
+    tools = [
+        ensure_server_running,
+        list_docs,
+        set_active_doc,
+        new_doc,
+        read_doc,
+        edit_doc,
+        stream_edit,
+        add_comment,
+        list_comments,
+        get_comment,
+        resolve_comment,
+        delete_comment,
+    ]
+    guide = load_agent_guide()
+    # MCPServer added `instructions=` in a yet-to-be-released patch. Until
+    # that ships on PyPI, fall back to setting `instructions` on the
+    # underlying mcp.server.Server after construction — it's read during
+    # the initialize handshake, so setting it pre-run() still reaches the
+    # client. Drop this fallback once the orchestral floor in pyproject
+    # is bumped past the release that forwards the kwarg.
+    try:
+        server = MCPServer(
+            tools=tools, name="agenTeX", version="0.1.0",
+            instructions=guide, use_display_names=True,
+        )
+    except TypeError as e:
+        if "instructions" not in str(e):
+            raise
+        server = MCPServer(
+            tools=tools, name="agenTeX", version="0.1.0",
+            use_display_names=True,
+        )
+        server._server.instructions = guide
+    server.run()
 
 
 if __name__ == "__main__":
