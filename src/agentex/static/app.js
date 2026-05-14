@@ -2479,6 +2479,15 @@
     }
     return parts.join(", ");
   }
+  // Tools that return `{"ok": False, ...}` (or JSON-style `false`) signal a
+  // logical failure without raising — the backend's `failed` flag only
+  // catches exceptions, so sniff the result string so the pill still goes
+  // red. Matches Python repr style (`'ok': False`) and JSON style
+  // (`"ok": false`).
+  function _resultIndicatesFailure(result) {
+    if (typeof result !== "string" || !result) return false;
+    return /['"]ok['"]\s*:\s*[fF]alse\b/.test(result);
+  }
   function upsertToolCallPill(commentId, info, rowOverride) {
     if (!commentId || !info.call_id) return;
     // During buildCommentRow's events replay the row hasn't been
@@ -2507,8 +2516,11 @@
       pill.appendChild(body);
       flow.appendChild(pill);
     }
+    const state = (info.state === "done" && _resultIndicatesFailure(info.result))
+      ? "failed"
+      : info.state;
     pill.classList.remove("running", "done", "failed");
-    pill.classList.add(info.state);
+    pill.classList.add(state);
     const head = pill.querySelector(".tool-pill-head");
     const argSummary = _summarizeArgs(info.args);
     const rtTag =
@@ -2829,10 +2841,21 @@
       // Snapshot the thread's mode at submit time — by the time the POST
       // returns the user may have toggled the thread.
       const wantAgent = isAgentEnabledForThread(threadRootId);
+      const hasText = !!text.trim();
+      // Empty text + "Post" is a no-op; keep the form open so the user
+      // can type. Empty text + "Ask Agent" is the natural retry gesture
+      // (e.g. they just deleted a failed agent reply): re-request the
+      // agent against this row's comment without creating a new one.
+      if (!hasText && !wantAgent) return;
       replyInput.value = "";
       replyForm.hidden = true;
-      const newId = await postReply(c.id, text);
-      if (wantAgent && newId) await requestApiResponse(newId);
+      let targetId = c.id;
+      if (hasText) {
+        const newId = await postReply(c.id, text);
+        if (!newId) return;
+        targetId = newId;
+      }
+      if (wantAgent) await requestApiResponse(targetId);
     });
     // Enter submits the reply; Shift+Enter inserts a newline. Other
     // modifier combos (Cmd/Ctrl/Alt+Enter) fall through to the textarea's
