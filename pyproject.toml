@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentex"
 version = "0.1.1"
-description = "Live LaTeX rendering interface for working alongside Claude Code"
+description = "Live LaTeX rendering interface for agent-assisted writing"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
