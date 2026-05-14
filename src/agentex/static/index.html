@@ -84,6 +84,16 @@
         </section>
         <div class="divider" id="divider" aria-hidden="true"></div>
         <section class="pane preview-pane">
+          <div id="pdf-gutter" class="pdf-gutter" hidden aria-label="PDF view controls">
+            <button id="zoom-out-btn" class="pdf-gutter-btn" type="button" title="Zoom out (⌘−)" aria-label="Zoom out">−</button>
+            <button id="zoom-pct-btn" class="pdf-gutter-pct" type="button" title="Reset to fit width (⌘0)" aria-label="Reset zoom">100%</button>
+            <button id="zoom-in-btn" class="pdf-gutter-btn" type="button" title="Zoom in (⌘+)" aria-label="Zoom in">+</button>
+            <span class="pdf-gutter-sep" aria-hidden="true"></span>
+            <button id="zoom-fit-btn" class="pdf-gutter-btn" type="button" title="Fit width" aria-label="Fit width">Fit</button>
+            <button id="zoom-actual-btn" class="pdf-gutter-btn" type="button" title="Actual size (100% of natural resolution)" aria-label="Actual size">1:1</button>
+            <span class="pdf-gutter-spacer" aria-hidden="true"></span>
+            <span id="pdf-page-indicator" class="pdf-gutter-pages" aria-live="polite">p 1/1</span>
+          </div>
           <div id="preview" class="preview" aria-label="PDF preview"></div>
           <pre class="error" id="error" hidden></pre>
         </section>

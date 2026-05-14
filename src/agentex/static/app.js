@@ -3,6 +3,13 @@
   const statusEl = $("status");
   const statusLabel = statusEl.querySelector(".label");
   const previewEl = $("preview");
+  const pdfGutterEl = $("pdf-gutter");
+  const zoomOutBtn = $("zoom-out-btn");
+  const zoomInBtn = $("zoom-in-btn");
+  const zoomPctBtn = $("zoom-pct-btn");
+  const zoomFitBtn = $("zoom-fit-btn");
+  const zoomActualBtn = $("zoom-actual-btn");
+  const pdfPageIndicator = $("pdf-page-indicator");
   const errorEl = $("error");
   const renderBtn = $("render-btn");
   const downloadBtn = $("download-btn");
@@ -1272,6 +1279,15 @@
   // time renderPdf finishes since the canvases are now at the new pdfScale.
   let visualScale = 1.0;
   let lastPaneWidth = 0;
+  // PDF page tracking — used to populate the gutter's "p N/M" indicator
+  // and the saturated-zoom hint. Set when renderPdf finishes; updated as
+  // the user scrolls (throttled with rAF).
+  let pdfTotalPages = 0;
+  let pdfCurrentPage = 1;
+  // Cached fit-scale (paneW / naturalVp.width). Lets the "1:1" gutter
+  // button compute the zoomFactor that produces actual-size rendering.
+  let lastFitScale = 1.0;
+  let zoomTimer = null;
 
   // Rendered-canvas cache, keyed by the /api/pdf?h=<hash> URL. Switching
   // between an .md and a .tex preview otherwise re-fetches and re-parses
@@ -1312,12 +1328,18 @@
       const myToken = ++renderToken;
       previewEl.classList.remove("md");
       previewEl.classList.add("pdf");
+      showPdfGutter(true);
       currentPdfUrl = url;
       downloadBtn.disabled = false;
       pdfScale = cached.pdfScale;
       visualScale = 1.0;
       lastPaneWidth = paneW;
       previewEl.replaceChildren(...cached.canvases);
+      pdfTotalPages = cached.canvases.length;
+      lastFitScale = cached.fitScale || 1.0;
+      pdfCurrentPage = computeCurrentPdfPage();
+      updatePdfPageIndicator();
+      updateZoomPctDisplay();
       // LRU touch — re-insert moves it to the end of Map's iteration order.
       _pdfCanvasCache.delete(url);
       _pdfCanvasCache.set(url, cached);
@@ -1331,6 +1353,7 @@
     }
     previewEl.classList.remove("md");
     previewEl.classList.add("pdf");
+    showPdfGutter(true);
     currentPdfUrl = url;
     downloadBtn.disabled = false;
     const myToken = ++renderToken;
@@ -1355,10 +1378,14 @@
       const naturalVp = page1.getViewport({ scale: 1.0 });
       const paneW = previewEl.clientWidth || 600;
       const fitScale = Math.max(0.05, (paneW - PDF_PAGE_PAD) / naturalVp.width);
+      lastFitScale = fitScale;
       pdfScale = Math.max(PDF_SCALE_MIN, Math.min(PDF_SCALE_MAX, fitScale * zoomFactor));
     } catch (e) {
       // Fall back to last pdfScale if we can't measure
     }
+    pdfTotalPages = pdf.numPages;
+    updatePdfPageIndicator();
+    updateZoomPctDisplay();
     if (myToken !== renderToken) return;
     const dpr = window.devicePixelRatio || 1;
     const scale = pdfScale * dpr;
@@ -1406,6 +1433,7 @@
       canvases: finalCanvases,
       paneW,
       pdfScale,
+      fitScale: lastFitScale,
       scroll: null,
     });
     _evictOldestPdfsIfNeeded();
@@ -1419,6 +1447,116 @@
     });
   }
 
+  // ---------- PDF zoom + gutter ----------
+  // setZoomFactor is the single funnel through which zoom changes. It
+  // clamps, updates state, applies the visual scale immediately for
+  // snappy feedback, refreshes the gutter UI, and schedules a sharp
+  // re-render at the new scale once the user pauses. Callers that want
+  // to keep the cursor pinned during a wheel-zoom use zoomAtPoint
+  // (which wraps setZoomFactor with pre/post anchor math).
+  function setZoomFactor(z) {
+    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+    if (Math.abs(clamped - zoomFactor) < 1e-6) {
+      updateZoomPctDisplay();
+      return false;
+    }
+    const ratio = clamped / zoomFactor;
+    zoomFactor = clamped;
+    visualScale *= ratio;
+    applyVisualScale();
+    updateZoomPctDisplay();
+    if (currentPdfUrl) {
+      if (zoomTimer) clearTimeout(zoomTimer);
+      zoomTimer = setTimeout(() => {
+        if (!currentPdfUrl) return;
+        // Invalidate the cache entry for this URL — it was rasterized at
+        // the OLD zoom factor, and the cache hit branch in renderPdf
+        // would otherwise silently revert our zoom by restoring those
+        // canvases. Dropping the entry forces a fresh render at the
+        // current zoomFactor.
+        _pdfCanvasCache.delete(currentPdfUrl);
+        const sh2 = previewEl.scrollHeight;
+        const anchor = { ratio: sh2 > 0 ? previewEl.scrollTop / sh2 : 0, offset: 0 };
+        renderPdf(currentPdfUrl, anchor);
+      }, 180);
+    }
+    return true;
+  }
+
+  function zoomAtPoint(newZoom, clientX, clientY) {
+    const target = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+    if (Math.abs(target - zoomFactor) < 1e-6) {
+      flashSaturated();
+      return;
+    }
+    const rect = previewEl.getBoundingClientRect();
+    const cursorX = (clientX != null) ? clientX - rect.left : previewEl.clientWidth / 2;
+    const cursorY = (clientY != null) ? clientY - rect.top : previewEl.clientHeight / 2;
+    const sw = previewEl.scrollWidth;
+    const sh = previewEl.scrollHeight;
+    const xRatio = sw > 0 ? (previewEl.scrollLeft + cursorX) / sw : 0;
+    const yRatio = sh > 0 ? (previewEl.scrollTop + cursorY) / sh : 0;
+    if (!setZoomFactor(target)) return;
+    const newSw = previewEl.scrollWidth;
+    const newSh = previewEl.scrollHeight;
+    const tgtLeft = xRatio * newSw - cursorX;
+    const tgtTop = yRatio * newSh - cursorY;
+    const maxX = Math.max(0, newSw - previewEl.clientWidth);
+    const maxY = Math.max(0, newSh - previewEl.clientHeight);
+    previewEl.scrollLeft = Math.max(0, Math.min(tgtLeft, maxX));
+    previewEl.scrollTop = Math.max(0, Math.min(tgtTop, maxY));
+  }
+
+  function updateZoomPctDisplay() {
+    if (!zoomPctBtn) return;
+    zoomPctBtn.textContent = Math.round(zoomFactor * 100) + "%";
+    const atMin = zoomFactor <= ZOOM_MIN + 1e-6;
+    const atMax = zoomFactor >= ZOOM_MAX - 1e-6;
+    zoomPctBtn.classList.toggle("saturated", atMin || atMax);
+    if (zoomOutBtn) zoomOutBtn.disabled = atMin;
+    if (zoomInBtn) zoomInBtn.disabled = atMax;
+  }
+
+  let _saturatedFlashTimer = null;
+  function flashSaturated() {
+    if (!zoomPctBtn) return;
+    zoomPctBtn.classList.add("saturated");
+    if (_saturatedFlashTimer) clearTimeout(_saturatedFlashTimer);
+    _saturatedFlashTimer = setTimeout(() => {
+      // Only drop the class if we're not actually saturated.
+      const atMin = zoomFactor <= ZOOM_MIN + 1e-6;
+      const atMax = zoomFactor >= ZOOM_MAX - 1e-6;
+      if (!atMin && !atMax) zoomPctBtn.classList.remove("saturated");
+    }, 250);
+  }
+
+  function updatePdfPageIndicator() {
+    if (!pdfPageIndicator) return;
+    pdfPageIndicator.textContent = `p ${pdfCurrentPage}/${pdfTotalPages || 1}`;
+  }
+
+  function computeCurrentPdfPage() {
+    const canvases = previewEl.querySelectorAll(".pdf-page");
+    if (!canvases.length) return 1;
+    const viewportCenter = previewEl.scrollTop + previewEl.clientHeight / 2;
+    let closest = 1;
+    let closestDist = Infinity;
+    canvases.forEach((c) => {
+      const center = c.offsetTop + c.offsetHeight / 2;
+      const d = Math.abs(center - viewportCenter);
+      if (d < closestDist) {
+        closestDist = d;
+        closest = parseInt(c.dataset.pageNum || "1", 10);
+      }
+    });
+    return closest;
+  }
+
+  function showPdfGutter(show) {
+    if (!pdfGutterEl) return;
+    pdfGutterEl.hidden = !show;
+  }
+
   function renderMarkdown(text) {
     // Save the PDF's last scroll so a switch back to the same .tex
     // restores where the user was reading.
@@ -1428,6 +1566,7 @@
     downloadBtn.disabled = true;
     visualScale = 1.0;
     lastPaneWidth = 0;
+    showPdfGutter(false);
     const wasInMdMode = previewEl.classList.contains("md");
     previewEl.classList.remove("pdf");
     previewEl.classList.add("md");
@@ -2277,50 +2416,72 @@
     if (px > 0) lsSet(COMMENTS_WIDTH_KEY, px);
   });
 
-  let zoomTimer = null;
+  // Trackpad pinches arrive as wheel events with ctrlKey:true; mouse-wheel
+  // zooming requires the user to hold Ctrl. We deliberately don't honor
+  // Cmd-wheel because (a) trackpad pinch already covers Mac, and (b) Cmd
+  // is a system-level modifier we'd rather leave alone.
   previewEl.addEventListener("wheel", (e) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
+    if (!e.ctrlKey) return;
     if (!previewEl.classList.contains("pdf")) return;
     e.preventDefault();
-    // Trackpad pinches and mouse wheels both arrive here. Scale per tick so
-    // pinch motion (many small deltas) feels continuous.
     const intensity = Math.min(0.25, Math.abs(e.deltaY) / 200);
     const factor = e.deltaY < 0 ? 1 + intensity : 1 / (1 + intensity);
-    const newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomFactor * factor));
-    if (newZoom === zoomFactor) return;
-
-    const rect = previewEl.getBoundingClientRect();
-    const cursorX = e.clientX - rect.left;
-    const cursorY = e.clientY - rect.top;
-    const sw = previewEl.scrollWidth;
-    const sh = previewEl.scrollHeight;
-    const docX = previewEl.scrollLeft + cursorX;
-    const docY = previewEl.scrollTop + cursorY;
-    const xRatio = sw > 0 ? docX / sw : 0;
-    const yRatio = sh > 0 ? docY / sh : 0;
-
-    visualScale *= newZoom / zoomFactor;
-    zoomFactor = newZoom;
-    applyVisualScale();
-
-    // Re-anchor both axes so the cursor stays over the same content.
-    const newSw = previewEl.scrollWidth;
-    const newSh = previewEl.scrollHeight;
-    const tgtLeft = xRatio * newSw - cursorX;
-    const tgtTop = yRatio * newSh - cursorY;
-    const maxX = Math.max(0, newSw - previewEl.clientWidth);
-    const maxY = Math.max(0, newSh - previewEl.clientHeight);
-    previewEl.scrollLeft = Math.max(0, Math.min(tgtLeft, maxX));
-    previewEl.scrollTop = Math.max(0, Math.min(tgtTop, maxY));
-
-    if (zoomTimer) clearTimeout(zoomTimer);
-    zoomTimer = setTimeout(() => {
-      if (!currentPdfUrl) return;
-      const sh2 = previewEl.scrollHeight;
-      const anchor = { ratio: sh2 > 0 ? previewEl.scrollTop / sh2 : 0, offset: 0 };
-      renderPdf(currentPdfUrl, anchor);
-    }, 140);
+    zoomAtPoint(zoomFactor * factor, e.clientX, e.clientY);
   }, { passive: false });
+
+  // Gutter buttons. − / + step zoom by ~15% per click. The percentage
+  // chip is also a button that resets to fit-width (i.e. zoomFactor=1).
+  // "1:1" resolves Actual Size against the cached fit scale: at the
+  // computed zoomFactor, fitScale * zoomFactor == 1, so a PDF point
+  // renders as one CSS pixel.
+  if (zoomOutBtn) zoomOutBtn.addEventListener("click", () => zoomAtPoint(zoomFactor / 1.15));
+  if (zoomInBtn) zoomInBtn.addEventListener("click", () => zoomAtPoint(zoomFactor * 1.15));
+  if (zoomPctBtn) zoomPctBtn.addEventListener("click", () => setZoomFactor(1.0));
+  if (zoomFitBtn) zoomFitBtn.addEventListener("click", () => setZoomFactor(1.0));
+  if (zoomActualBtn) zoomActualBtn.addEventListener("click", () => {
+    if (!lastFitScale || lastFitScale <= 0) return;
+    setZoomFactor(1.0 / lastFitScale);
+  });
+
+  // Page indicator: update as the user scrolls. rAF-throttled so a fast
+  // scroll fires at most one recompute per frame.
+  let _pageScrollRaf = 0;
+  previewEl.addEventListener("scroll", () => {
+    if (!previewEl.classList.contains("pdf")) return;
+    if (_pageScrollRaf) return;
+    _pageScrollRaf = requestAnimationFrame(() => {
+      _pageScrollRaf = 0;
+      const p = computeCurrentPdfPage();
+      if (p !== pdfCurrentPage) {
+        pdfCurrentPage = p;
+        updatePdfPageIndicator();
+      }
+    });
+  }, { passive: true });
+
+  // Keyboard zoom shortcuts — active whenever a PDF is showing, regardless
+  // of editor focus. Pre-empts the browser's page-zoom defaults via
+  // preventDefault. Cmd is treated as a metaKey across platforms; Ctrl
+  // works on Linux/Windows.
+  document.addEventListener("keydown", (e) => {
+    if (!previewEl.classList.contains("pdf")) return;
+    if (!(e.metaKey || e.ctrlKey)) return;
+    let handled = false;
+    if (e.key === "=" || e.key === "+") {
+      zoomAtPoint(zoomFactor * 1.15);
+      handled = true;
+    } else if (e.key === "-" || e.key === "_") {
+      zoomAtPoint(zoomFactor / 1.15);
+      handled = true;
+    } else if (e.key === "0") {
+      setZoomFactor(1.0);
+      handled = true;
+    }
+    if (handled) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
 
   // Refit-on-resize: when the preview pane changes size (window/divider),
   // re-render so the canvas tracks fit-to-pane * zoomFactor. During the

@@ -790,6 +790,68 @@ body {
 .preview-pane {
   flex: 1 1 50%;
   min-width: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* PDF view-control gutter. Shown only when previewing a PDF. */
+.pdf-gutter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0 8px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.pdf-gutter[hidden] { display: none; }
+.pdf-gutter-btn,
+.pdf-gutter-pct {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 1px 7px;
+  font: inherit;
+  cursor: pointer;
+  line-height: 18px;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.pdf-gutter-btn:hover,
+.pdf-gutter-pct:hover {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg);
+}
+.pdf-gutter-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-color: transparent;
+  background: transparent;
+}
+.pdf-gutter-pct {
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.pdf-gutter-pct.saturated {
+  color: var(--accent, #e8c34f);
+}
+.pdf-gutter-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.pdf-gutter-spacer { flex: 1 1 auto; }
+.pdf-gutter-pages {
+  font-variant-numeric: tabular-nums;
+  padding: 0 4px;
 }
 
 .editor-pane > textarea {
