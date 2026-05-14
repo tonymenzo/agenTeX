@@ -3571,6 +3571,8 @@
     ...(editor.getOption("extraKeys") || {}),
     "Cmd-K": () => openCmdkPrompt(),
     "Ctrl-K": () => openCmdkPrompt(),
+    "Shift-Cmd-K": () => openCiteModal(),
+    "Shift-Ctrl-K": () => openCiteModal(),
   });
 
   commentsBtn.addEventListener("click", () => {

@@ -1647,10 +1647,16 @@ async def inspire_bibtex(recid: str) -> str | None:
 
 
 def _pick_bib_destination() -> Path:
-    """Active .bib if open; else docs/ref.bib (created on demand)."""
+    """Active .bib if open; else a ref.bib next to the active doc (created
+    on demand). LaTeX resolves \\bibliography relative to the .tex file,
+    so co-locating the bib is what users expect when citing from a doc
+    nested under the project root (e.g. docs/papers/foo/paper.tex picks
+    up docs/papers/foo/ref.bib, not docs/ref.bib)."""
     if state.active_doc.suffix == ".bib" and state.active_doc.exists():
         return state.active_doc
-    default = DOCS / "ref.bib"
+    # Fall back to the project root only if we somehow have no active doc.
+    parent = state.active_doc.parent if state.active_doc else DOCS
+    default = parent / "ref.bib"
     if not default.exists():
         default.write_text(_TEMPLATE_BIB, encoding="utf-8")
     return default
