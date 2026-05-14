@@ -48,14 +48,14 @@ def main() -> None:
     # is bumped past the release that forwards the kwarg.
     try:
         server = MCPServer(
-            tools=tools, name="agenTeX", version="0.1.1",
+            tools=tools, name="agenTeX", version="0.1.2",
             instructions=guide, use_display_names=True,
         )
     except TypeError as e:
         if "instructions" not in str(e):
             raise
         server = MCPServer(
-            tools=tools, name="agenTeX", version="0.1.1",
+            tools=tools, name="agenTeX", version="0.1.2",
             use_display_names=True,
         )
         server._server.instructions = guide
