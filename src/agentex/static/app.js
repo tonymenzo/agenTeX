@@ -697,10 +697,9 @@
     // is still explicit; nothing fires silently.
     if (citePrefilledKey && citeResults.length > 0) {
       const target = citePrefilledKey.toLowerCase();
-      const exactIdx = citeResults.findIndex((r) => {
-        const keys = Array.isArray(r.texkeys) ? r.texkeys : [];
-        return keys.some((k) => String(k).toLowerCase() === target);
-      });
+      const exactIdx = citeResults.findIndex(
+        (r) => String(r.texkey || "").toLowerCase() === target,
+      );
       if (exactIdx >= 0) citeActiveIndex = exactIdx;
     }
 
@@ -792,8 +791,7 @@
     let skipInsert = false;
     if (citePrefilledKey) {
       const target = citePrefilledKey.toLowerCase();
-      const keys = Array.isArray(result.texkeys) ? result.texkeys : [];
-      if (keys.some((k) => String(k).toLowerCase() === target)) {
+      if (String(result.texkey || "").toLowerCase() === target) {
         skipInsert = true;
       }
     }
