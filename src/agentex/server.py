@@ -3084,13 +3084,48 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 if __name__ == "__main__":
+    import socket
     import uvicorn
 
     host = os.environ.get("AGENTEX_HOST", "127.0.0.1")
-    port = int(os.environ.get("AGENTEX_PORT", "8000"))
+    requested_port = int(os.environ.get("AGENTEX_PORT", "8000"))
+
+    def _find_free_port(start: int, host: str, max_offset: int = 20) -> int:
+        """Probe up to max_offset+1 ports starting at `start`. SO_REUSEADDR
+        matches uvicorn's bind options so the probe sees the same address
+        space (without it, TIME_WAIT sockets would falsely report a port
+        as taken)."""
+        for offset in range(max_offset + 1):
+            p = start + offset
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind((host, p))
+                    return p
+                except OSError:
+                    continue
+        raise RuntimeError(
+            f"agenTeX: no free port in {start}..{start + max_offset}"
+        )
+
+    port = _find_free_port(requested_port, host)
+    if port != requested_port:
+        print(
+            f"agenTeX: port {requested_port} in use; using {port} instead",
+            file=sys.stderr,
+        )
     # Surface where the editor is rooted so the user sees instantly whether
     # the positional arg / AGENTEX_PROJECT resolved as expected.
-    print(f"agenTeX: docs   = {DOCS}", file=sys.stderr)
-    print(f"agenTeX: state  = {AGENTEX}", file=sys.stderr)
-    print(f"agenTeX: build  = {BUILD}", file=sys.stderr)
+    print(f"agenTeX: docs    = {DOCS}", file=sys.stderr)
+    print(f"agenTeX: state   = {AGENTEX}", file=sys.stderr)
+    print(f"agenTeX: build   = {BUILD}", file=sys.stderr)
+    print(f"agenTeX: listening on http://{host}:{port}", file=sys.stderr)
+    # Stash the bound port so MCP tools (and any other peer tied to this
+    # project) can find this instance without a hard-coded port. Read by
+    # tools/agentex.py:_resolve_agentex_base.
+    try:
+        AGENTEX.mkdir(parents=True, exist_ok=True)
+        (AGENTEX / "port").write_text(str(port), encoding="utf-8")
+    except OSError:
+        pass
     uvicorn.run(app, host=host, port=port, log_level="info")

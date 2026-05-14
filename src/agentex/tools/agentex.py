@@ -27,8 +27,27 @@ from orchestral.tools.base.tool import BaseTool
 from pydantic_core import PydanticUndefined
 
 AGENTEX_ROOT = Path(__file__).resolve().parent.parent
-AGENTEX_BASE = os.environ.get("AGENTEX_BASE", "http://127.0.0.1:8000")
 SERVER_PYTHON = os.environ.get("AGENTEX_PYTHON", sys.executable)
+
+
+def _resolve_agentex_base() -> str:
+    """Pick the URL of the agentex HTTP server this MCP process should
+    talk to. Priority: explicit AGENTEX_BASE env var, then the port
+    written by the project's running server into `.agentex/port`,
+    finally the historic 8000 default. Re-resolved on each _server_up
+    check so a freshly-spawned server (with an auto-picked port that
+    differs from 8000) is followed correctly."""
+    base = os.environ.get("AGENTEX_BASE")
+    if base:
+        return base.rstrip("/")
+    try:
+        port = int((Path.cwd() / ".agentex" / "port").read_text(encoding="utf-8").strip())
+        return f"http://127.0.0.1:{port}"
+    except (OSError, ValueError):
+        return "http://127.0.0.1:8000"
+
+
+AGENTEX_BASE = _resolve_agentex_base()
 
 
 class StatelessRuntimeTool(BaseTool):
@@ -58,6 +77,11 @@ class StatelessRuntimeTool(BaseTool):
 
 
 def _server_up(timeout: float = 1.0) -> bool:
+    # Re-read .agentex/port on each check so an auto-port-pick after a
+    # bind conflict propagates to subsequent tool calls in this MCP
+    # session. (Cheap: one file read per check.)
+    global AGENTEX_BASE
+    AGENTEX_BASE = _resolve_agentex_base()
     try:
         with urllib.request.urlopen(f"{AGENTEX_BASE}/api/doc", timeout=timeout) as r:
             return r.status == 200
