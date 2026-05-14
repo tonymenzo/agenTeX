@@ -1518,7 +1518,7 @@
     if (myToken !== renderToken) return;
     const dpr = window.devicePixelRatio || 1;
     const scale = pdfScale * dpr;
-    const canvases = new Array(pdf.numPages);
+    const pageWraps = new Array(pdf.numPages);
     await Promise.all(
       Array.from({ length: pdf.numPages }, (_, i) => (async () => {
         const page = await pdf.getPage(i + 1);
@@ -1544,11 +1544,25 @@
         canvas.addEventListener("dblclick", (e) => onPdfClick(canvas, e));
         await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
         if (myToken !== renderToken) return;
-        canvases[i] = canvas;
+        // Wrap canvas in a positioned container so an overlay link layer
+        // (refs, eqs, external URLs) sits at the right rects on top.
+        const wrap = document.createElement("div");
+        wrap.className = "pdf-page-wrap";
+        wrap.dataset.pageNum = String(i + 1);
+        wrap.style.width = baseW + "px";
+        wrap.appendChild(canvas);
+        try {
+          const layer = await renderLinkLayer(page, viewport, baseW, dpr, pdf);
+          if (layer && myToken === renderToken) wrap.appendChild(layer);
+        } catch (e) {
+          console.warn("pdf link layer failed for page " + (i + 1), e);
+        }
+        if (myToken !== renderToken) return;
+        pageWraps[i] = wrap;
       })())
     );
     if (myToken !== renderToken) return;
-    const finalCanvases = canvases.filter(Boolean);
+    const finalCanvases = pageWraps.filter(Boolean);
     previewEl.replaceChildren(...finalCanvases);
     visualScale = 1.0;
     const newScrollHeight = previewEl.scrollHeight;
@@ -1569,11 +1583,97 @@
   }
 
   function applyVisualScale() {
+    // Scale both the canvas and its wrap. Wrap explicit width lets the
+    // overlay link layer (position: absolute; inset: 0) follow correctly.
     const canvases = previewEl.querySelectorAll(".pdf-page");
     canvases.forEach((c) => {
       const baseW = parseFloat(c.dataset.baseW);
-      if (baseW > 0) c.style.width = (baseW * visualScale) + "px";
+      if (!(baseW > 0)) return;
+      const scaled = baseW * visualScale;
+      c.style.width = scaled + "px";
+      if (c.parentElement && c.parentElement.classList.contains("pdf-page-wrap")) {
+        c.parentElement.style.width = scaled + "px";
+      }
     });
+  }
+
+  // Render an overlay div with one <a> per Link annotation on the page.
+  // External URLs open in a new tab; internal destinations scroll the
+  // preview to the target page. Positions are stored as percentages of
+  // the layer so visualScale (CSS-only zoom) carries them along.
+  async function renderLinkLayer(page, viewport, baseW, dpr, pdf) {
+    let annotations;
+    try {
+      annotations = await page.getAnnotations({ intent: "display" });
+    } catch (e) {
+      return null;
+    }
+    const links = annotations.filter(
+      (a) => a.subtype === "Link" && (a.url || a.dest),
+    );
+    if (!links.length) return null;
+    const layer = document.createElement("div");
+    layer.className = "pdf-link-layer";
+    const baseH = viewport.height / dpr;
+    for (const ann of links) {
+      // ann.rect is in PDF user space (origin bottom-left). The viewport
+      // helper converts to viewport coordinates with the y-axis flipped
+      // to match CSS (origin top-left).
+      const rect = viewport.convertToViewportRectangle(ann.rect);
+      const x = Math.min(rect[0], rect[2]) / dpr;
+      const y = Math.min(rect[1], rect[3]) / dpr;
+      const w = Math.abs(rect[2] - rect[0]) / dpr;
+      const h = Math.abs(rect[3] - rect[1]) / dpr;
+      const a = document.createElement("a");
+      a.style.left = (x / baseW * 100) + "%";
+      a.style.top = (y / baseH * 100) + "%";
+      a.style.width = (w / baseW * 100) + "%";
+      a.style.height = (h / baseH * 100) + "%";
+      if (ann.url) {
+        a.href = ann.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.title = ann.url;
+      } else if (ann.dest) {
+        a.href = "#";
+        const dest = ann.dest;
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          navigateToPdfDest(pdf, dest);
+        });
+      }
+      layer.appendChild(a);
+    }
+    return layer;
+  }
+
+  async function navigateToPdfDest(pdf, dest) {
+    let destArray = dest;
+    if (typeof destArray === "string") {
+      try {
+        destArray = await pdf.getDestination(destArray);
+      } catch (e) {
+        return;
+      }
+    }
+    if (!Array.isArray(destArray) || destArray.length === 0) return;
+    let pageIdx;
+    try {
+      pageIdx = await pdf.getPageIndex(destArray[0]);
+    } catch (e) {
+      return;
+    }
+    const wrap = previewEl.querySelector(
+      `.pdf-page-wrap[data-page-num="${pageIdx + 1}"]`,
+    );
+    if (!wrap) return;
+    // Use bounding-rect math so we work correctly regardless of which
+    // ancestor is the canvas's offsetParent.
+    const containerRect = previewEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    const targetTop = previewEl.scrollTop + (wrapRect.top - containerRect.top) - 20;
+    previewEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
   }
 
   // ---------- PDF zoom + gutter ----------
@@ -1668,17 +1768,23 @@
   }
 
   function computeCurrentPdfPage() {
-    const canvases = previewEl.querySelectorAll(".pdf-page");
-    if (!canvases.length) return 1;
-    const viewportCenter = previewEl.scrollTop + previewEl.clientHeight / 2;
+    // Iterate the wrap divs (each carries data-page-num). Use bounding
+    // rect math so it works regardless of which ancestor is the
+    // offsetParent — the wrap is position:relative, which means its
+    // contained canvas's offsetTop is 0, not what we want here.
+    const wraps = previewEl.querySelectorAll(".pdf-page-wrap");
+    if (!wraps.length) return 1;
+    const containerRect = previewEl.getBoundingClientRect();
+    const viewportCenter = previewEl.clientHeight / 2;
     let closest = 1;
     let closestDist = Infinity;
-    canvases.forEach((c) => {
-      const center = c.offsetTop + c.offsetHeight / 2;
+    wraps.forEach((w) => {
+      const r = w.getBoundingClientRect();
+      const center = (r.top - containerRect.top) + r.height / 2;
       const d = Math.abs(center - viewportCenter);
       if (d < closestDist) {
         closestDist = d;
-        closest = parseInt(c.dataset.pageNum || "1", 10);
+        closest = parseInt(w.dataset.pageNum || "1", 10);
       }
     });
     return closest;
@@ -2591,23 +2697,57 @@
     });
   }, { passive: true });
 
-  // Keyboard zoom shortcuts — active whenever a PDF is showing, regardless
-  // of editor focus. Pre-empts the browser's page-zoom defaults via
-  // preventDefault. Cmd is treated as a metaKey across platforms; Ctrl
-  // works on Linux/Windows.
+  // Editor font zoom: same Cmd/Ctrl + +/-/0 keys as the PDF zoom, routed
+  // by whichever pane the user is actively in. Persisted in localStorage
+  // so the size sticks across reloads.
+  const EDITOR_FONT_DEFAULT = 13;
+  const EDITOR_FONT_MIN = 9;
+  const EDITOR_FONT_MAX = 28;
+  const EDITOR_FONT_KEY = "editorFontSize";
+  let editorFontSize = Number(lsGet(EDITOR_FONT_KEY, EDITOR_FONT_DEFAULT)) || EDITOR_FONT_DEFAULT;
+  function applyEditorFontSize() {
+    const wrap = editor.getWrapperElement();
+    if (!wrap) return;
+    wrap.style.fontSize = editorFontSize + "px";
+    editor.refresh();
+  }
+  function bumpEditorFontSize(delta) {
+    const next = Math.max(EDITOR_FONT_MIN,
+                          Math.min(EDITOR_FONT_MAX, editorFontSize + delta));
+    if (next === editorFontSize) return;
+    editorFontSize = next;
+    applyEditorFontSize();
+    lsSet(EDITOR_FONT_KEY, editorFontSize);
+  }
+  // Initial application — only writes the CSS if the user has previously
+  // bumped from default; otherwise leaves the stylesheet rule in charge.
+  if (editorFontSize !== EDITOR_FONT_DEFAULT) applyEditorFontSize();
+
+  // Cmd/Ctrl + +/-/0 zooms whichever pane the user is actively in. When
+  // the CodeMirror editor has focus, we adjust its font size; otherwise
+  // (and as long as a PDF is showing) we zoom the PDF. Always pre-empts
+  // the browser's page-zoom default.
   document.addEventListener("keydown", (e) => {
-    if (!previewEl.classList.contains("pdf")) return;
     if (!(e.metaKey || e.ctrlKey)) return;
     let handled = false;
+    const editorActive = editor.hasFocus();
+    const pdfShowing = previewEl.classList.contains("pdf");
     if (e.key === "=" || e.key === "+") {
-      zoomAtPoint(zoomFactor * 1.15);
-      handled = true;
+      if (editorActive) { bumpEditorFontSize(+1); handled = true; }
+      else if (pdfShowing) { zoomAtPoint(zoomFactor * 1.15); handled = true; }
     } else if (e.key === "-" || e.key === "_") {
-      zoomAtPoint(zoomFactor / 1.15);
-      handled = true;
+      if (editorActive) { bumpEditorFontSize(-1); handled = true; }
+      else if (pdfShowing) { zoomAtPoint(zoomFactor / 1.15); handled = true; }
     } else if (e.key === "0") {
-      setZoomFactor(1.0);
-      handled = true;
+      if (editorActive) {
+        editorFontSize = EDITOR_FONT_DEFAULT;
+        applyEditorFontSize();
+        lsSet(EDITOR_FONT_KEY, editorFontSize);
+        handled = true;
+      } else if (pdfShowing) {
+        setZoomFactor(1.0);
+        handled = true;
+      }
     }
     if (handled) {
       e.preventDefault();

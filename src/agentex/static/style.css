@@ -1016,6 +1016,31 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Per-page wrap: positions the canvas + a sibling annotation layer so
+   links (refs, eqs, external URLs) can sit on top in the right rect. */
+.pdf-page-wrap {
+  position: relative;
+  display: block;
+}
+.pdf-link-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pdf-link-layer a {
+  position: absolute;
+  display: block;
+  pointer-events: auto;
+  cursor: pointer;
+  /* Subtle hover hint so the link region is discoverable but doesn't
+     visually clutter the page. */
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.pdf-link-layer a:hover {
+  background: rgba(64, 128, 255, 0.12);
+}
+
 .pdf-page {
   display: block;
   background: white;
