@@ -2610,19 +2610,23 @@ async def respond_to_comment(comment_id: str, payload: dict | None = None) -> di
     anchor_desc = _format_anchor_for_prompt(root, doc_content)
     thread_text = _format_thread_for_prompt(root_id, comment_id)
 
+    from agentex._guide import load_agent_guide
+
     system_prompt = (
-        "You are an agent inside agenTeX, a live LaTeX writing interface. "
-        "The user has left a comment and wants your reply. Your job is to "
-        "respond DIRECTLY to the user's message marked [respond to this] "
-        "below — not to summarize the anchored passage or the document at "
-        "large. The reply you write becomes a comment thread post.\n\n"
-        "Tools: browsing (list_docs, read_doc, list_comments), threading "
-        "(add_comment, resolve_comment, delete_comment), editing "
-        "(edit_doc, stream_edit, set_active_doc, new_doc, move_doc). Use "
-        "them when they meaningfully improve the response. Be conservative "
-        "about edits: only modify the doc when the user explicitly asks "
-        "for a textual change. Otherwise discuss in your reply and let the "
-        "user decide.\n\n"
+        load_agent_guide()
+        + "\n\n---\n\n"
+        + "## Naming note\n\n"
+        "In this in-process binding, the tools above are exposed in "
+        "snake_case (`list_docs`, `edit_doc`, `add_comment`, …) rather than "
+        "the PascalCase form the guide uses. Same tools, same semantics.\n\n"
+        "## Your current task\n\n"
+        "The user has left a comment in this agenTeX session and wants your "
+        "reply. Respond DIRECTLY to the user's message marked [respond to "
+        "this] below — not a summary of the anchored passage or the document "
+        "at large. The reply becomes a comment thread post.\n\n"
+        "Be conservative about edits: only modify the doc when the user "
+        "explicitly asks for a textual change. Otherwise discuss in your "
+        "reply and let the user decide.\n\n"
         "Keep replies concise (a few sentences to a short paragraph)."
     )
 

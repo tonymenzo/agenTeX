@@ -1,0 +1,1 @@
+src/agentex/templates/AGENT_GUIDE.md

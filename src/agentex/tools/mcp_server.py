@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from orchestral.mcp import MCPServer
 
+from agentex._guide import load_agent_guide
 from agentex.tools.agentex import (
     add_comment,
     delete_comment,
@@ -41,6 +42,7 @@ def main() -> None:
         ],
         name="agenTeX",
         version="0.1.0",
+        instructions=load_agent_guide(),
         use_display_names=True,
     ).run()
 
