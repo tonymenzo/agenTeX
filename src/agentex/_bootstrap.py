@@ -75,13 +75,30 @@ def _merge_mcp_json(path: Path, server_name: str, command: str) -> str:
     return "updated"
 
 
+def _write_claude_import_shim(project_dir: Path, *, force: bool) -> tuple[Path, str]:
+    """Write a CLAUDE.md that imports AGENTS.md via `@AGENTS.md`.
+
+    Claude Code auto-loads CLAUDE.md (and walks up directories for it) but
+    does not read AGENTS.md directly. The `@AGENTS.md` import expands at
+    launch, so a one-line shim makes Claude pick up the same guide other
+    agents read natively, without duplicating the content."""
+    dest = project_dir / "CLAUDE.md"
+    existed = dest.exists()
+    if existed and not force:
+        return dest, "kept"
+    dest.write_text("@AGENTS.md\n", encoding="utf-8")
+    return dest, ("overwritten" if existed else "created")
+
+
 def bootstrap_claude(project_dir: Path, *, force: bool = False) -> list[str]:
     project_dir.mkdir(parents=True, exist_ok=True)
     agents_path, agents_status = _copy_agents_md(project_dir, force=force)
+    claude_path, claude_status = _write_claude_import_shim(project_dir, force=force)
     mcp_path = project_dir / ".mcp.json"
     mcp_status = _merge_mcp_json(mcp_path, "agenTeX", _agentex_mcp_command())
     return [
         f"  {agents_status:>11}  {agents_path}",
+        f"  {claude_status:>11}  {claude_path}",
         f"  {mcp_status:>11}  {mcp_path}",
     ]
 
