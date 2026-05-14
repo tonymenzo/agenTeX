@@ -798,15 +798,22 @@ body {
   flex-direction: column;
 }
 
-/* PDF view-control gutter. Shown only when previewing a PDF. */
+/* PDF view-control gutter. Shown only when previewing a PDF. Controls are
+   grouped into rounded "segmented" clusters so the zoom triad and the
+   fit/actual-size pair read as related actions rather than as a flat row
+   of buttons. */
 .pdf-gutter {
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 28px;
-  flex: 0 0 28px;
-  padding: 0 8px;
-  background: var(--bg-elev);
+  gap: 12px;
+  height: 30px;
+  flex: 0 0 30px;
+  padding: 0 10px;
+  background: linear-gradient(
+    to bottom,
+    var(--bg-elev) 0%,
+    color-mix(in srgb, var(--bg-elev) 92%, var(--bg) 8%) 100%
+  );
   border-bottom: 1px solid var(--border);
   font-family: var(--sans);
   font-size: 11.5px;
@@ -814,48 +821,102 @@ body {
   user-select: none;
 }
 .pdf-gutter[hidden] { display: none; }
-.pdf-gutter-btn,
+
+/* Segmented group: a single rounded background with internal hairlines
+   between its members. Hover lights up just the hovered cell. */
+.pdf-gutter-group {
+  display: flex;
+  align-items: stretch;
+  height: 20px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.pdf-gutter-group > button + button {
+  border-left: 1px solid var(--border);
+}
+
+.pdf-gutter-icon-btn,
+.pdf-gutter-text-btn,
 .pdf-gutter-pct {
+  appearance: none;
   background: transparent;
   color: var(--text-dim);
-  border: 1px solid transparent;
-  border-radius: 3px;
-  padding: 1px 7px;
+  border: none;
+  padding: 0 8px;
+  margin: 0;
   font: inherit;
+  font-size: 11px;
+  line-height: 1;
   cursor: pointer;
-  line-height: 18px;
-  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  transition: color 0.12s ease, background 0.12s ease;
 }
-.pdf-gutter-btn:hover,
+.pdf-gutter-icon-btn { padding: 0 7px; }
+.pdf-gutter-icon-btn svg { display: block; }
+.pdf-gutter-icon-btn:hover,
+.pdf-gutter-text-btn:hover,
 .pdf-gutter-pct:hover {
   color: var(--text);
-  border-color: var(--border);
-  background: var(--bg);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
-.pdf-gutter-btn:disabled {
-  opacity: 0.4;
+.pdf-gutter-icon-btn:active,
+.pdf-gutter-text-btn:active,
+.pdf-gutter-pct:active {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+.pdf-gutter-icon-btn:disabled,
+.pdf-gutter-text-btn:disabled {
+  opacity: 0.35;
   cursor: not-allowed;
-  border-color: transparent;
   background: transparent;
+  color: var(--text-dim);
 }
+
 .pdf-gutter-pct {
-  min-width: 44px;
-  text-align: center;
+  min-width: 52px;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  font-feature-settings: "tnum";
 }
 .pdf-gutter-pct.saturated {
   color: var(--accent, #e8c34f);
 }
-.pdf-gutter-sep {
-  width: 1px;
-  height: 16px;
-  background: var(--border);
-  margin: 0 4px;
-}
-.pdf-gutter-spacer { flex: 1 1 auto; }
-.pdf-gutter-pages {
+
+.pdf-gutter-text-btn {
   font-variant-numeric: tabular-nums;
-  padding: 0 4px;
+  letter-spacing: 0.02em;
+  min-width: 28px;
+}
+
+.pdf-gutter-spacer { flex: 1 1 auto; }
+
+.pdf-gutter-pages {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 0 6px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  letter-spacing: 0.02em;
+}
+.pdf-gutter-pages-num {
+  color: var(--text);
+  min-width: 1.3em;
+  text-align: right;
+}
+.pdf-gutter-pages-sep {
+  opacity: 0.55;
+  padding: 0 1px;
+}
+.pdf-gutter-pages-total {
+  min-width: 1.3em;
+  text-align: left;
 }
 
 .editor-pane > textarea {

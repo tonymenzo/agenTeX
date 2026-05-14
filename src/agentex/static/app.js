@@ -1576,7 +1576,10 @@
 
   function updatePdfPageIndicator() {
     if (!pdfPageIndicator) return;
-    pdfPageIndicator.textContent = `p ${pdfCurrentPage}/${pdfTotalPages || 1}`;
+    const numEl = pdfPageIndicator.querySelector(".pdf-gutter-pages-num");
+    const totEl = pdfPageIndicator.querySelector(".pdf-gutter-pages-total");
+    if (numEl) numEl.textContent = String(pdfCurrentPage);
+    if (totEl) totEl.textContent = String(pdfTotalPages || 1);
   }
 
   function computeCurrentPdfPage() {
