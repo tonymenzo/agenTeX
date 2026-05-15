@@ -1931,11 +1931,43 @@
     const newPos = editor.posFromIndex(streamPos);
     editor.setCursor(newPos);
     editor.scrollIntoView(newPos, 80);
+    // For .md targets, keep the preview live as text streams in. The
+    // server doesn't broadcast `rendered_md` until after stream_end +
+    // a 0.4s debounce, so on a large insert the preview otherwise sits
+    // on the pre-edit content for the entire streaming duration. We
+    // throttle to ~5 Hz so marked + KaTeX don't bog down the page.
+    scheduleLocalMdPreviewRender();
   }
 
   function streamEnd() {
     streaming = false;
     setStatus("idle", "streamed");
+    // One last local render so the preview matches the final editor
+    // content immediately, instead of waiting for the server's debounced
+    // `rendered_md` to arrive ~0.4s later.
+    flushLocalMdPreviewRender();
+  }
+
+  let mdPreviewRenderTimer = null;
+  function isMdRenderTarget() {
+    return !!renderTargetName && renderTargetName.endsWith(".md");
+  }
+  function scheduleLocalMdPreviewRender() {
+    if (!isMdRenderTarget()) return;
+    if (mdPreviewRenderTimer) return;
+    mdPreviewRenderTimer = setTimeout(() => {
+      mdPreviewRenderTimer = null;
+      if (!isMdRenderTarget()) return;
+      renderMarkdown(editor.getValue());
+    }, 200);
+  }
+  function flushLocalMdPreviewRender() {
+    if (mdPreviewRenderTimer) {
+      clearTimeout(mdPreviewRenderTimer);
+      mdPreviewRenderTimer = null;
+    }
+    if (!isMdRenderTarget()) return;
+    renderMarkdown(editor.getValue());
   }
 
   function modeForDoc(name) {
@@ -2116,6 +2148,19 @@
         editor.setValue(content);
         editor.setCursor(cursor);
         editor.scrollTo(scroll.left, scroll.top);
+        // For .md targets, render the preview locally now rather than
+        // waiting ~0.4s for the server's debounced `rendered_md` to
+        // arrive. Skip during streaming — streamChar's throttled renderer
+        // is already running and the canonical broadcast at stream_end
+        // will re-render anyway.
+        if (
+          !streaming &&
+          path &&
+          path === renderTargetName &&
+          path.endsWith(".md")
+        ) {
+          renderMarkdown(content);
+        }
       }
     }
     if (path) editorActiveDoc = path;
@@ -3154,7 +3199,18 @@
   // parse-fail; renderCommentsPanel re-renders the row from state once
   // the stream ends, at which point this runs on the finalized text.
   function renderCommentTextWithMath(el, text) {
-    el.textContent = text || "";
+    // Stash the raw markdown source so streaming chunks can re-render
+    // from "everything so far" instead of trying to append into the
+    // already-rendered HTML (where textContent != source).
+    el.dataset.raw = text || "";
+    if (window.marked && text) {
+      // breaks: true → single newlines become <br> so an agent that
+      // writes one line per thought still looks right without forcing
+      // them to leave blank lines between every line.
+      el.innerHTML = window.marked.parse(text, { breaks: true });
+    } else {
+      el.textContent = text || "";
+    }
     if (!window.renderMathInElement || !text) return;
     try {
       window.renderMathInElement(el, {
@@ -3189,7 +3245,12 @@
       last.className = "comment-text-segment";
       flow.appendChild(last);
     }
-    last.textContent = (last.textContent || "") + text;
+    // Re-render from "all source seen so far" rather than appending to
+    // textContent — once marked has rendered the segment to HTML the
+    // textContent is the *visible* text, not the markdown source, so
+    // a plain += would silently drop the formatting.
+    const raw = (last.dataset.raw || "") + text;
+    renderCommentTextWithMath(last, raw);
     row.classList.add("comment-streaming");
   }
 
@@ -3250,9 +3311,24 @@
       e.preventDefault();
       const on = isAgentEnabledForThread(rootId);
       setAgentEnabledForThread(rootId, !on);
-      // Re-render so the reply form's submit button picks up the new
-      // label + gold styling for the new state.
-      renderCommentsPanel();
+      refresh();
+      // Update the affected reply forms in-place. A full
+      // renderCommentsPanel() would wipe any text the user has already
+      // typed into a reply textarea in this thread.
+      const newOn = isAgentEnabledForThread(rootId);
+      const threadEl = commentsListEl.querySelector(
+        `.comment-thread[data-thread-id="${CSS.escape(rootId)}"]`,
+      );
+      if (threadEl) {
+        threadEl
+          .querySelectorAll(".comment-reply-form button[type=submit]")
+          .forEach((btn) => {
+            btn.className = newOn
+              ? "comment-action-btn ask-agent"
+              : "comment-action-btn";
+            btn.textContent = newOn ? "Ask Agent" : "Post";
+          });
+      }
     });
     toggle.addEventListener("dblclick", (e) => e.stopPropagation());
     return toggle;
