@@ -2816,26 +2816,71 @@
   // bumped from default; otherwise leaves the stylesheet rule in charge.
   if (editorFontSize !== EDITOR_FONT_DEFAULT) applyEditorFontSize();
 
-  // Cmd/Ctrl + +/-/0 zooms whichever pane the user is actively in. When
-  // the CodeMirror editor has focus, we adjust its font size; otherwise
-  // (and as long as a PDF is showing) we zoom the PDF. Always pre-empts
-  // the browser's page-zoom default.
+  // Comments panel zoom: scales the whole panel via the CSS `zoom`
+  // property (well-supported in Chrome/Safari/Firefox). Smaller surface
+  // area than the editor + PDF case so a coarser step (15%) per press
+  // feels right.
+  const COMMENTS_ZOOM_DEFAULT = 1.0;
+  const COMMENTS_ZOOM_MIN = 0.7;
+  const COMMENTS_ZOOM_MAX = 1.8;
+  const COMMENTS_ZOOM_STEP = 0.1;
+  const COMMENTS_ZOOM_KEY = "commentsZoom";
+  let commentsZoom = Number(lsGet(COMMENTS_ZOOM_KEY, COMMENTS_ZOOM_DEFAULT)) || COMMENTS_ZOOM_DEFAULT;
+  function applyCommentsZoom() {
+    if (!commentsPanel) return;
+    commentsPanel.style.zoom = String(commentsZoom);
+  }
+  function bumpCommentsZoom(delta) {
+    const next = Math.max(COMMENTS_ZOOM_MIN,
+                          Math.min(COMMENTS_ZOOM_MAX,
+                                   commentsZoom + delta * COMMENTS_ZOOM_STEP));
+    if (Math.abs(next - commentsZoom) < 1e-6) return;
+    commentsZoom = next;
+    applyCommentsZoom();
+    lsSet(COMMENTS_ZOOM_KEY, commentsZoom);
+  }
+  if (commentsZoom !== COMMENTS_ZOOM_DEFAULT) applyCommentsZoom();
+
+  // True when the user's keyboard focus sits inside the comments panel
+  // (e.g. inside a reply textarea or on a sidebar button). A bare scroll
+  // doesn't qualify — there's no focused descendant — so this errs on
+  // "editor/PDF first, comments only when actively typing/clicking
+  // inside the panel". Acceptable since the panel is rarely the primary
+  // attention site.
+  function commentsPanelHasFocus() {
+    if (!commentsPanel || commentsPanel.hidden) return false;
+    const a = document.activeElement;
+    return !!a && a !== document.body && commentsPanel.contains(a);
+  }
+
+  // Cmd/Ctrl + +/-/0 zooms whichever pane the user is actively in:
+  // editor (if focused) → its font; comments panel (if a child is
+  // focused) → its CSS zoom; PDF (if showing) → its zoomFactor. Always
+  // pre-empts the browser's page-zoom default when one of those fires.
   document.addEventListener("keydown", (e) => {
     if (!(e.metaKey || e.ctrlKey)) return;
     let handled = false;
     const editorActive = editor.hasFocus();
+    const commentsActive = commentsPanelHasFocus();
     const pdfShowing = previewEl.classList.contains("pdf");
     if (e.key === "=" || e.key === "+") {
       if (editorActive) { bumpEditorFontSize(+1); handled = true; }
+      else if (commentsActive) { bumpCommentsZoom(+1); handled = true; }
       else if (pdfShowing) { zoomAtPoint(zoomFactor * 1.15); handled = true; }
     } else if (e.key === "-" || e.key === "_") {
       if (editorActive) { bumpEditorFontSize(-1); handled = true; }
+      else if (commentsActive) { bumpCommentsZoom(-1); handled = true; }
       else if (pdfShowing) { zoomAtPoint(zoomFactor / 1.15); handled = true; }
     } else if (e.key === "0") {
       if (editorActive) {
         editorFontSize = EDITOR_FONT_DEFAULT;
         applyEditorFontSize();
         lsSet(EDITOR_FONT_KEY, editorFontSize);
+        handled = true;
+      } else if (commentsActive) {
+        commentsZoom = COMMENTS_ZOOM_DEFAULT;
+        applyCommentsZoom();
+        lsSet(COMMENTS_ZOOM_KEY, commentsZoom);
         handled = true;
       } else if (pdfShowing) {
         setZoomFactor(1.0);
