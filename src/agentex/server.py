@@ -2410,8 +2410,50 @@ def _provider_spec(provider: str) -> dict:
     return spec
 
 
+# Model-id prefixes that unambiguously name a provider. Used to infer the
+# provider when the user sets a model (via picker or AGENTEX_API_MODEL) but
+# never set AGENTEX_API_PROVIDER — otherwise we'd default to anthropic and
+# demand ANTHROPIC_API_KEY for, say, a gemini-* model.
+_MODEL_PROVIDER_PREFIXES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("claude",), "anthropic"),
+    (("gpt", "o1", "o3", "o4", "chatgpt"), "openai"),
+    (("gemini",), "google"),
+    (("mistral", "magistral", "mixtral", "codestral"), "mistral"),
+)
+
+
+def _provider_for_model(model: str) -> str | None:
+    """Best-effort provider inference from a model id. Returns None when the
+    name doesn't unambiguously belong to one provider (e.g. llama-*, which
+    could be groq or ollama)."""
+    m = (model or "").lower()
+    for prefixes, provider in _MODEL_PROVIDER_PREFIXES:
+        if m.startswith(prefixes):
+            return provider
+    return None
+
+
 def _resolve_provider(override: str | None = None) -> str:
-    return (override or os.environ.get("AGENTEX_API_PROVIDER") or "anthropic").lower()
+    if override:
+        return override.lower()
+    env = os.environ.get("AGENTEX_API_PROVIDER")
+    if env:
+        return env.lower()
+    # No explicit provider. Infer from an explicitly-configured model id...
+    model = os.environ.get("AGENTEX_API_MODEL")
+    if model:
+        inferred = _provider_for_model(model)
+        if inferred:
+            return inferred
+    # ...otherwise pick the first provider whose key/host is configured, so a
+    # user who only set GOOGLE_API_KEY gets google rather than a dead anthropic
+    # default. Skip ollama (local, always "present") to avoid auto-selecting it.
+    for name in _LLM_PROVIDERS:
+        if name == "ollama":
+            continue
+        if _api_key_present(name):
+            return name
+    return "anthropic"
 
 
 def _resolve_model(provider: str, override: str | None = None) -> str:
