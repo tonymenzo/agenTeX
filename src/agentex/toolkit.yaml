@@ -1,0 +1,85 @@
+# toolbase manifest for the agenTeX *external* tool surface.
+#
+# Only the HTTP arm (tools/agentex.py) is listed here. Those tools talk to a
+# running agenTeX server over HTTP, so they work from a separate process —
+# which is exactly toolbase's model (it serves each toolkit from its own host
+# subprocess over MCP). This is the surface external agents (Claude Code,
+# Codex, …) drive.
+#
+# tools/in_process_tools.py is deliberately NOT listed: those call the server's
+# handlers directly on its event loop and only function inside the agenTeX
+# server process (the comments-panel streaming agent). In a toolbase host
+# subprocess there is no live server loop, so every call would fail. They are
+# internal to agenTeX and never served via toolbase.
+#
+# NB: do not blindly re-run `toolbase ingest` — it would re-discover
+# in_process_tools.py (a BaseTool surface) and re-add it. Keep this file
+# hand-maintained.
+name: agenTeX
+version: 0.1.4
+description: A next-to-minimal live editing surface for agent-assisted writing.
+author: Tony Menzo
+license: MIT
+category: other
+python_version: '3.12'
+keywords:
+  - latex
+  - markdown
+  - writing
+  - editor
+  - live-preview
+config:
+  - name: agentex_command
+    description: >-
+      Command (or absolute path) used to launch the agenTeX server when
+      `ensure_server_running` finds none already up. toolbase serves only the
+      thin HTTP tools from a minimal venv; the server is a full agenTeX
+      install that owns its own interpreter and dependencies, so it is located
+      by command rather than by Python path. Defaults to `agentex` on PATH
+      (provided by `brew install tonymenzo/agentex/agentex` or
+      `pip install agentex`). Point it at a specific install to pin the
+      environment, e.g. /opt/homebrew/bin/agentex or
+      ~/miniconda3/envs/agentex/bin/agentex.
+    type: string
+    required: false
+    default: agentex
+tools:
+  - module: tools.agentex
+    name: ensure_server_running
+    description: Ensure the agenTeX web server is reachable; spawn one if not.
+  - module: tools.agentex
+    name: list_docs
+    description: List all documents in the agenTeX project.
+  - module: tools.agentex
+    name: read_doc
+    description: Return the current content of the active agenTeX document.
+  - module: tools.agentex
+    name: set_active_doc
+    description: Switch the active document (and render target for .tex/.md).
+  - module: tools.agentex
+    name: new_doc
+    description: Create a new document under the project root, optionally from a template.
+  - module: tools.agentex
+    name: move_doc
+    description: Move or rename a document or directory under the project.
+  - module: tools.agentex
+    name: edit_doc
+    description: Replace a unique occurrence of `find` with `replace` in the active doc.
+  - module: tools.agentex
+    name: stream_edit
+    description: Stream-insert text into the active doc, character by character.
+  - module: tools.agentex
+    name: add_comment
+    description: Post a review comment (or a reply via parent_id) on the active doc.
+  - module: tools.agentex
+    name: list_comments
+    description: List review comments; filter by doc, author, or pending_only.
+  - module: tools.agentex
+    name: get_comment
+    description: Fetch a single comment by id, plus any replies to it.
+  - module: tools.agentex
+    name: resolve_comment
+    description: Mark a comment resolved, or re-open it with resolved=false.
+  - module: tools.agentex
+    name: delete_comment
+    description: Permanently remove a comment. Prefer resolve_comment.

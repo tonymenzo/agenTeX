@@ -11,6 +11,7 @@ src/agentex/tools/mov2gif.sh
 .build/
 .agentex/
 .tectonic-cache/
+.toolbase/
 .claude/state/
 *.aux
 *.log
