@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentex"
-version = "0.1.6"
+version = "0.1.7"
 description = "Live LaTeX rendering interface for agent-assisted writing"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,10 +18,10 @@ dependencies = [
     "requests>=2.31",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
-    # Provider SDKs moved to orchestral extras in 1.5+; declare the ones the
-    # picker uses (google is required for Gemini) so the lean base install
-    # still pulls google-genai / mistralai / boto3.
-    "orchestral-ai[google,mistral,bedrock]>=1.6.1",
+    # Provider SDKs moved to orchestral extras in 1.5+; declare the google
+    # extra so the lean base install still pulls google-genai for Gemini.
+    # (anthropic/openai/groq/ollama remain in orchestral's base deps.)
+    "orchestral-ai[google]>=1.6.1",
 ]
 
 [project.scripts]
