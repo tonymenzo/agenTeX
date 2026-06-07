@@ -2364,7 +2364,7 @@ _LLM_PROVIDERS: dict[str, dict] = {
     },
     "google": {
         "kind": "native", "orchestral_attr": "Gemini",
-        "default_model": "gemini-2.0-flash-exp",
+        "default_model": "gemini-2.5-flash",
         "key_env": "GOOGLE_API_KEY",
     },
     "groq": {
