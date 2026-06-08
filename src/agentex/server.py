@@ -1325,6 +1325,14 @@ async def broadcast_existing_render(ws: WebSocket | None = None) -> None:
             await sender(
                 {"type": "rendered", "url": f"/api/pdf?h={pdf_hash}", "target": target_rel}
             )
+            # If the source has been touched since the cached PDF was built
+            # (external edit while no client was watching, or a watcher miss),
+            # schedule a fresh render so the stale PDF gets replaced.
+            try:
+                if target.stat().st_mtime > out.stat().st_mtime:
+                    schedule_render()
+            except OSError:
+                pass
         else:
             # No build yet for this target — kick one off so the preview catches
             # up instead of leaving the previous doc's PDF on screen.
