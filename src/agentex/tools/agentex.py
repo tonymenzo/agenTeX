@@ -12,8 +12,8 @@ writes are wrong.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -26,8 +26,15 @@ from orchestral.tools.base.field_utils import is_state_field
 from orchestral.tools.base.tool import BaseTool
 from pydantic_core import PydanticUndefined
 
-AGENTEX_ROOT = Path(__file__).resolve().parent.parent
-SERVER_PYTHON = os.environ.get("AGENTEX_PYTHON", sys.executable)
+# Command used to launch the agenTeX server when none is running. toolbase
+# serves only the thin HTTP tools (this module) from a minimal venv; the
+# server itself is a full agenTeX install (Homebrew/pip/conda) that owns its
+# own interpreter + deps. We locate it by *command*, not by interpreter path:
+# `agentex` resolves on PATH for a Homebrew/pip install. Override per-toolkit
+# with the `agentex_command` config field (toolbase injects it as a state
+# field on ensure_server_running) or, as a fallback, the AGENTEX_COMMAND env
+# var.
+DEFAULT_AGENTEX_COMMAND = os.environ.get("AGENTEX_COMMAND", "agentex")
 
 
 def _resolve_agentex_base() -> str:
@@ -89,10 +96,19 @@ def _server_up(timeout: float = 1.0) -> bool:
         return False
 
 
-@define_tool(base=StatelessRuntimeTool)
+@define_tool(
+    base=StatelessRuntimeTool,
+    state=["agentex_command"],
+    param_descriptions={
+        "agentex_command": "Command (or absolute path) used to launch the "
+        "agenTeX server. Toolkit config, not an agent-facing argument: "
+        "toolbase injects it from the `agentex_command` config field.",
+    },
+)
 def ensure_server_running(
     wait_seconds: int = 6,
     project_path: str = "",
+    agentex_command: str = DEFAULT_AGENTEX_COMMAND,
 ) -> dict[str, Any]:
     """Make sure the agenTeX web server is reachable on its expected port.
 
@@ -100,31 +116,50 @@ def ensure_server_running(
     or stream_edit. If the server is already up, returns immediately (the
     running server's project path is whatever was passed when IT was
     launched — this tool does NOT restart a running server to repoint it).
-    If it's down, spawns `python server.py [project_path]` as a detached
-    background process and waits up to `wait_seconds` seconds for the port
-    to become reachable.
+    If it's down, launches the installed agenTeX CLI as
+    `agentex_command [project_path]` (a detached background process) and waits
+    up to `wait_seconds` seconds for the port to become reachable. The CLI is
+    a full agenTeX install that owns its own interpreter + deps — this is why
+    we launch it by command rather than running `server.py` under toolbase's
+    minimal tool venv (which lacks the server's dependencies).
 
     `project_path`: optional absolute path to root the editor at. When
     given, `.agentex` and `.build` live inside that path. When empty, the
     server uses AGENTEX_PROJECT from the environment, falling back to the
     in-repo `docs/`.
 
+    `agentex_command`: toolkit config (injected, not agent-facing). The
+    command used to launch the server; defaults to `agentex` on PATH.
+
     The spawned process survives the MCP server's lifetime --- if Claude
     Code exits, the user's browser session keeps working.
     """
     if _server_up():
         return {"running": True, "started": False, "base": AGENTEX_BASE}
-    cmd = [SERVER_PYTHON, "server.py"]
+    cmd = shlex.split(agentex_command or DEFAULT_AGENTEX_COMMAND)
     if project_path:
         cmd.append(project_path)
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(AGENTEX_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=project_path or None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        return {
+            "running": False,
+            "started": False,
+            "project_path": project_path or None,
+            "error": (
+                f"could not launch agenTeX via {cmd[0]!r}: {e}. Install it so "
+                "`agentex` is on PATH (`brew install tonymenzo/agentex/agentex` "
+                "or `pip install agentex`), or set the launch command with "
+                "`tb config set agenTeX agentex_command <path-or-command>`."
+            ),
+        }
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         if _server_up():
