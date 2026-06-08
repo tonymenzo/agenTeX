@@ -166,6 +166,36 @@ def stream_edit(text: str, after_line: int = -1, delay_ms: int = 15) -> dict[str
 
 # ---------- comments ----------
 
+def _slim_comment(c: dict[str, Any], msg_chars: int = 240) -> dict[str, Any]:
+    """Project a stored comment down to the fields an agent needs to identify
+    and act on it. The raw record carries reanchoring blobs (prefix/suffix,
+    from_line/to_ch, …) and, for agent replies, full events/tool_calls logs —
+    none of which help pick a comment id, and all of which bloat the payload
+    until the real ids are buried. Keep it id-forward and short."""
+    msg = (c.get("message") or "")
+    if len(msg) > msg_chars:
+        msg = msg[:msg_chars] + "…"
+    slim: dict[str, Any] = {
+        "id": c.get("id"),
+        "doc": c.get("doc"),
+        "author": c.get("author"),
+        "kind": c.get("kind"),
+        "resolved": bool(c.get("resolved")),
+        "parent_id": c.get("parent_id"),
+        "message": msg,
+    }
+    if c.get("orphaned"):
+        slim["orphaned"] = True
+    # Carry the one anchor field that names where the comment lives, so the
+    # agent can disambiguate same-author threads on the same doc.
+    if c.get("kind") == "range" and c.get("excerpt"):
+        ex = c["excerpt"]
+        slim["excerpt"] = ex[:80] + "…" if len(ex) > 80 else ex
+    elif c.get("kind") == "line":
+        slim["line"] = c.get("line")
+    return slim
+
+
 @define_tool(base=StatelessRuntimeTool)
 def list_comments(
     doc: str = "",
@@ -173,9 +203,11 @@ def list_comments(
     include_resolved: bool = False,
     pending_only: bool = False,
 ) -> dict[str, Any]:
-    """List comments across the project. `author="user", pending_only=True`
-    surfaces user prompts awaiting an agent reply."""
-    return _call_async(
+    """List comments across the project, as slim id-forward records
+    (`{id, doc, author, kind, resolved, parent_id, message, …}`; message
+    truncated). `author="user", pending_only=True` surfaces user prompts
+    awaiting an agent reply. Filter with `doc=` to scope to one file."""
+    res = _call_async(
         _server().get_comments(
             doc=doc,
             include_resolved=include_resolved,
@@ -183,6 +215,9 @@ def list_comments(
             pending_only=pending_only,
         )
     )
+    if isinstance(res, dict) and isinstance(res.get("comments"), list):
+        res = {**res, "comments": [_slim_comment(c) for c in res["comments"]]}
+    return res
 
 
 @define_tool(base=StatelessRuntimeTool)
@@ -238,3 +273,12 @@ AGENT_TOOLS = [
     resolve_comment,
     delete_comment,
 ]
+
+# Toolset for the per-comment respond agent (POST /api/comments/{id}/respond).
+# Same surface as AGENT_TOOLS. The agent is spawned fresh for one thread and
+# the thread's posts (with their real ids) are already in its prompt, so it
+# rarely needs list_comments — but it stays available for the case where the
+# user's message references a sibling thread. list_comments returns a slim,
+# id-forward projection (see _slim_comment) so the agent can pick the right
+# id without drowning in fat objects.
+RESPOND_AGENT_TOOLS = list(AGENT_TOOLS)

@@ -2336,7 +2336,12 @@ def _format_thread_for_prompt(root_id: str, target_id: str) -> str:
     for c in thread:
         marker = "  [respond to this]" if c.get("id") == target_id else ""
         author = c.get("author", "?")
-        lines.append(f"{author}: {c.get('message', '')}{marker}")
+        cid = c.get("id", "?")
+        # Prefix each post with its real comment id. The agent needs these
+        # to act on the thread (resolve_comment, add_comment parent_id);
+        # without them it fishes through list_comments and grabs the wrong
+        # one, or hallucinates an id outright.
+        lines.append(f"[{cid}] {author}: {c.get('message', '')}{marker}")
     return "\n".join(lines)
 
 
@@ -2679,7 +2684,19 @@ async def respond_to_comment(comment_id: str, payload: dict | None = None) -> di
         "The user has left a comment in this agenTeX session and wants your "
         "reply. Respond DIRECTLY to the user's message marked [respond to "
         "this] below — not a summary of the anchored passage or the document "
-        "at large. The reply becomes a comment thread post.\n\n"
+        "at large.\n\n"
+        "Your reply is the text you write now: it is posted automatically as "
+        "the next post in this thread. Do NOT call `add_comment` to deliver "
+        "your reply — that creates a duplicate. `add_comment` is only for a "
+        "genuinely NEW, separate point anchored elsewhere; never use it to "
+        "repeat, rephrase, or echo what you already said in your reply.\n\n"
+        "Stay scoped to THIS thread. Its posts are listed below with their "
+        "real comment ids in [brackets]; use those exact ids for "
+        "`resolve_comment` / `delete_comment` — never invent one. Everything "
+        "you need to reply is already below, so you should not need "
+        "`list_comments`; only reach for it if the user's message explicitly "
+        "points you at a different thread, and even then pass `doc=` to scope "
+        "it and take the id from its returned records.\n\n"
         "Be conservative about edits: only modify the doc when the user "
         "explicitly asks for a textual change. Otherwise discuss in your "
         "reply and let the user decide.\n\n"
@@ -2692,11 +2709,11 @@ async def respond_to_comment(comment_id: str, payload: dict | None = None) -> di
     target_msg = (target.get("message") or "").strip()
 
     user_prompt = (
-        "USER'S MESSAGE (respond to this):\n"
+        f"USER'S MESSAGE (comment {comment_id}, respond to this):\n"
         f"{target_msg!r}\n\n"
         "---\n"
-        f"Context — comment thread {anchor_desc}.\n\n"
-        f"Full thread (newest message marked [respond to this]):\n"
+        f"Context — comment thread (root {root_id}) {anchor_desc}.\n\n"
+        f"Full thread (each post prefixed [id]; newest marked [respond to this]):\n"
         f"{thread_text}\n\n"
         f"---\n"
         f"Document (path={doc_rel!r}):\n"
@@ -2706,7 +2723,7 @@ async def respond_to_comment(comment_id: str, payload: dict | None = None) -> di
     try:
         from orchestral import Agent
         from orchestral.context import Context
-        from agentex.tools.in_process_tools import AGENT_TOOLS
+        from agentex.tools.in_process_tools import RESPOND_AGENT_TOOLS
         client = _make_llm_client(provider, model, host)
     except (ImportError, ValueError) as e:
         raise HTTPException(503, str(e))
@@ -2805,7 +2822,7 @@ async def respond_to_comment(comment_id: str, payload: dict | None = None) -> di
             llm=client,
             context=ctx,
             system_prompt=system_prompt,
-            tools=list(AGENT_TOOLS),
+            tools=list(RESPOND_AGENT_TOOLS),
             max_tool_interations=6,
         )
         # Seed the user turn once; subsequent LLM turns re-use the same
