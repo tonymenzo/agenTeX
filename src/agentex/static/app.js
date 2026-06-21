@@ -1894,6 +1894,48 @@
     gutters: ["agentex-marks", "CodeMirror-linenumbers"],
   });
 
+  // CodeMirror keeps its selection in a dedicated layer (`display.selectionDiv`
+  // — the only child of lineSpace with `z-index: 1`, holding just the
+  // `.CodeMirror-selected` rects, separate from the text). We style that
+  // container directly to fix two rendering issues at once:
+  //
+  //  1. Safari/WebKit fails to repaint the area vacated by the translucent
+  //     full-width selection rectangles when a selection shrinks, leaving the
+  //     right side of no-longer-selected lines tinted. `translateZ(0)` promotes
+  //     the layer to its own GPU backing store so WebKit re-rasters it as a unit.
+  //  2. For a wrapped line CM emits overlapping rects (a per-row rect plus a
+  //     spanning block). With a translucent fill those stack into a brighter
+  //     band on the continuation rows. We instead fill the rects SOLID (in CSS)
+  //     and apply the translucency ONCE as group opacity here, so the overlap
+  //     flattens to a single solid shape before the alpha is applied.
+  //
+  // Both touch only the selection layer — text and cursor are separate siblings,
+  // so no subpixel-AA blur. No-op on Blink/Gecko, which already render correctly.
+  (function promoteSelectionLayer() {
+    const sel = editor
+      .getWrapperElement()
+      .querySelector('.CodeMirror-lines div[style*="z-index: 1"]');
+    if (sel) {
+      sel.style.transform = "translateZ(0)";
+      sel.style.opacity = "0.22";
+    }
+  })();
+
+  // Safari fix: CodeMirror suppresses its own dummy drag image on Safari (an
+  // ancient ~6.0.2 setDragImage segfault that no longer applies), so dragging
+  // selected text shows the ENTIRE editor as the drag ghost instead of moving
+  // just the text. Supply the same 1×1 transparent image CM uses on every other
+  // browser, restoring normal drag-to-move behavior. (Harmless elsewhere — it
+  // just re-sets the transparent image CM already uses.)
+  const blankDragImage = new Image();
+  blankDragImage.src =
+    "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+  editor.getScrollerElement().addEventListener("dragstart", (e) => {
+    if (e.dataTransfer && e.dataTransfer.setDragImage) {
+      e.dataTransfer.setDragImage(blankDragImage, 0, 0);
+    }
+  });
+
   editor.on("change", (_cm, change) => {
     if (suppressNextChange) {
       suppressNextChange = false;
@@ -4131,6 +4173,9 @@
     const input = document.createElement("textarea");
     input.className = "cmdk-prompt-input";
     input.placeholder = "Ask, suggest, or note…";
+    // Match the editor's live (zoomable) font size so the prompt reads at
+    // the same scale as the text it's acting on, not a fixed 13px.
+    input.style.fontSize = editorFontSize + "px";
     box.appendChild(input);
     // Action bar: equal-width buttons spanning the popup bottom. Each
     // button labels itself with its keyboard shortcut inline, so we don't

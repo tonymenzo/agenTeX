@@ -147,7 +147,7 @@ body {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 4px 6px;
+  padding: 6px 8px;
   outline: none;
   cursor: pointer;
   display: inline-flex;
@@ -155,7 +155,9 @@ body {
   justify-content: center;
   transition: border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
 }
-.topbar-btn svg { display: block; }
+/* Override the per-icon width/height baked into the SVG markup so every
+   top-gutter action shares one (larger) glyph size. */
+.topbar-btn svg { display: block; width: 18px; height: 18px; }
 
 .topbar-btn:hover {
   border-color: #2a2e36;
@@ -958,11 +960,39 @@ body {
   border-left: 1.5px solid var(--accent);
 }
 
-.cm-s-agentex .CodeMirror-selected,
+/* Drop target indicator: while dragging text, CodeMirror shows a separate
+   cursor at the prospective drop point (`.CodeMirror-dragcursors`). Render it
+   dotted and a touch wider so it reads as "drop here", distinct from the solid
+   insertion caret. */
+.cm-s-agentex .CodeMirror-dragcursors .CodeMirror-cursor {
+  border-left: 2px dotted var(--accent);
+}
+
+/* Selection is drawn by CodeMirror's own managed background layer, which it
+   rebuilds from scratch on every selection change — so it always matches the
+   real selection. Fill is SOLID here; the translucency is applied once as
+   group opacity on the whole selection container (see promoteSelectionLayer in
+   app.js). That way the overlapping rectangles CM emits for a wrapped line
+   (a per-row rect plus a spanning block) flatten to one solid shape *before*
+   the opacity is applied, instead of stacking two translucent layers into a
+   brighter band on the continuation rows. */
+.cm-s-agentex .CodeMirror-selected {
+  background: var(--accent);
+}
+/* In textarea input mode CM ALSO reflects the selection onto the visible
+   glyphs as a real native DOM selection. Painting that too (the old default
+   blue ::selection) double-draws every selection — and the translucent native
+   layer is the one the browser can fail to repaint when a drag-selection
+   shrinks, leaving lines highlighted that are no longer selected. Make the
+   native paint transparent so the managed layer above is the single source of
+   truth; the text itself stays selectable for copy. */
 .cm-s-agentex .CodeMirror-line::selection,
-.cm-s-agentex .CodeMirror-line > span::selection,
-.cm-s-agentex .CodeMirror-line > span > span::selection {
-  background: rgba(139, 158, 255, 0.22);
+.cm-s-agentex .CodeMirror-line ::selection {
+  background: transparent;
+}
+.cm-s-agentex .CodeMirror-line::-moz-selection,
+.cm-s-agentex .CodeMirror-line ::-moz-selection {
+  background: transparent;
 }
 
 .cm-s-agentex .CodeMirror-matchingbracket {
